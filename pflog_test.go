@@ -542,6 +542,80 @@ func TestScanner_Empty(t *testing.T) {
 	}
 }
 
+// ---- Benchmarks -------------------------------------------------------------
+
+var benchLines = []string{
+	`Mar 29 12:34:56 host postfix/smtpd[1]: connect from mail.example.com[203.0.113.10]`,
+	`Mar 29 12:34:56 host postfix/smtpd[1]: disconnect from unknown[10.0.0.1] ehlo=1 mail=1 rcpt=1 data=1 quit=1 commands=5`,
+	`Mar 29 12:34:56 host postfix/qmgr[1]: ABCDE12345: from=<sender@example.com>, size=12345, nrcpt=1 (queue active)`,
+	`Mar 29 12:34:56 host postfix/qmgr[1]: ABCDE12345: removed`,
+	`Mar 29 12:34:56 host postfix/cleanup[1]: ABCDE12345: message-id=<unique@mail.example.com>`,
+	`Mar 29 12:34:56 host postfix/smtp[1]: ABCDE12345: to=<user@example.com>, relay=mail.example.com[203.0.113.1]:25, delay=0.5, delays=0.1/0.0/0.1/0.3, dsn=2.0.0, status=sent (250 2.0.0 OK)`,
+	`Mar 29 12:34:56 host postfix/smtpd[1]: NOQUEUE: reject: RCPT from unknown[10.0.0.1]: 550 5.1.1 <x@y.z>: Recipient address rejected`,
+	`Mar 29 12:34:56 host postfix/bounce[1]: ABCDE12345: sender non-delivery notification: F0123456789`,
+	`Mar 29 12:34:56 host postfix/cleanup[1]: ABCDE12345: warning: header Subject: spam? from local; from=<x@y.z>`,
+	`Mar 29 12:34:56 host postfix/smtpd[1]: some unparsed smtpd message text`,
+}
+
+func BenchmarkParse_Connect(b *testing.B) {
+	line := `Mar 29 12:34:56 host postfix/smtpd[1]: connect from mail.example.com[203.0.113.10]`
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		pflog.Parse(line) //nolint:errcheck
+	}
+}
+
+func BenchmarkParse_Disconnect(b *testing.B) {
+	line := `Mar 29 12:34:56 host postfix/smtpd[1]: disconnect from unknown[10.0.0.1] ehlo=1 mail=1 rcpt=1 data=1 quit=1 commands=5`
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		pflog.Parse(line) //nolint:errcheck
+	}
+}
+
+func BenchmarkParse_Queued(b *testing.B) {
+	line := `Mar 29 12:34:56 host postfix/qmgr[1]: ABCDE12345: from=<sender@example.com>, size=12345, nrcpt=1 (queue active)`
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		pflog.Parse(line) //nolint:errcheck
+	}
+}
+
+func BenchmarkParse_Delivery(b *testing.B) {
+	line := `Mar 29 12:34:56 host postfix/smtp[1]: ABCDE12345: to=<user@example.com>, relay=mail.example.com[203.0.113.1]:25, delay=0.5, delays=0.1/0.0/0.1/0.3, dsn=2.0.0, status=sent (250 2.0.0 OK)`
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		pflog.Parse(line) //nolint:errcheck
+	}
+}
+
+func BenchmarkParse_Reject(b *testing.B) {
+	line := `Mar 29 12:34:56 host postfix/smtpd[1]: NOQUEUE: reject: RCPT from unknown[10.0.0.1]: 550 5.1.1 <x@y.z>: Recipient address rejected`
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		pflog.Parse(line) //nolint:errcheck
+	}
+}
+
+func BenchmarkParse_Unknown(b *testing.B) {
+	line := `Mar 29 12:34:56 host postfix/smtpd[1]: some unparsed smtpd message text`
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		pflog.Parse(line) //nolint:errcheck
+	}
+}
+
+func BenchmarkScanner(b *testing.B) {
+	input := strings.Join(benchLines, "\n")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		s := pflog.NewScanner(strings.NewReader(input))
+		for s.Scan() {
+		}
+	}
+}
+
 // ---- DeliveryStatus constants -----------------------------------------------
 
 func TestDeliveryStatusConstants(t *testing.T) {
