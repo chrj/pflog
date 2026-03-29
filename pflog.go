@@ -181,6 +181,50 @@ var monthNames = [12]string{
 	"Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 }
 
+// FormatError is returned by [Parse] when the input line does not conform to
+// the expected BSD syslog format.
+type FormatError struct {
+	// Line is the full input line that failed to parse.
+	Line string
+}
+
+func (e *FormatError) Error() string {
+	return fmt.Sprintf("pflog: invalid syslog format: %q", e.Line)
+}
+
+// TimestampError is returned by [Parse] when the timestamp portion of the
+// input line cannot be parsed. The underlying parse error is accessible via
+// [errors.Unwrap].
+type TimestampError struct {
+	// Timestamp is the raw timestamp string that failed to parse.
+	Timestamp string
+	// Err is the underlying parse error.
+	Err error
+}
+
+func (e *TimestampError) Error() string {
+	return fmt.Sprintf("pflog: invalid timestamp %q: %s", e.Timestamp, e.Err)
+}
+
+// Unwrap returns the underlying timestamp parse error.
+func (e *TimestampError) Unwrap() error { return e.Err }
+
+// PIDError is returned by [Parse] when the PID field cannot be parsed as an
+// integer. The underlying parse error is accessible via [errors.Unwrap].
+type PIDError struct {
+	// PID is the raw PID string that failed to parse.
+	PID string
+	// Err is the underlying parse error.
+	Err error
+}
+
+func (e *PIDError) Error() string {
+	return fmt.Sprintf("pflog: invalid PID %q: %s", e.PID, e.Err)
+}
+
+// Unwrap returns the underlying PID parse error.
+func (e *PIDError) Unwrap() error { return e.Err }
+
 // Parse parses a single Postfix log line and returns a [Record].
 //
 // The line must be in the standard BSD syslog format:
@@ -194,12 +238,12 @@ func Parse(line string) (*Record, error) {
 	// The BSD syslog timestamp is always exactly 15 characters: "Mmm _D HH:MM:SS"
 	const tsLen = 15
 	if len(line) <= tsLen || line[tsLen] != ' ' {
-		return nil, fmt.Errorf("pflog: invalid syslog format: %q", line)
+		return nil, &FormatError{Line: line}
 	}
 
 	ts, err := parseTimestamp(line[:tsLen])
 	if err != nil {
-		return nil, fmt.Errorf("pflog: invalid timestamp %q: %w", line[:tsLen], err)
+		return nil, &TimestampError{Timestamp: line[:tsLen], Err: err}
 	}
 
 	rest := line[tsLen+1:]
@@ -207,7 +251,7 @@ func Parse(line string) (*Record, error) {
 	// hostname is the next space-delimited token.
 	spaceIdx := strings.IndexByte(rest, ' ')
 	if spaceIdx < 0 {
-		return nil, fmt.Errorf("pflog: invalid syslog format: %q", line)
+		return nil, &FormatError{Line: line}
 	}
 	hostname := rest[:spaceIdx]
 	rest = rest[spaceIdx+1:]
@@ -215,7 +259,7 @@ func Parse(line string) (*Record, error) {
 	// process[pid]: — find the "[" that opens the PID.
 	bracketIdx := strings.IndexByte(rest, '[')
 	if bracketIdx < 0 {
-		return nil, fmt.Errorf("pflog: invalid syslog format: %q", line)
+		return nil, &FormatError{Line: line}
 	}
 	processField := rest[:bracketIdx]
 	rest = rest[bracketIdx+1:]
@@ -223,11 +267,11 @@ func Parse(line string) (*Record, error) {
 	// Find "]: " to delimit the PID and the message body.
 	colonIdx := strings.Index(rest, "]: ")
 	if colonIdx < 0 {
-		return nil, fmt.Errorf("pflog: invalid syslog format: %q", line)
+		return nil, &FormatError{Line: line}
 	}
 	pid, err := strconv.Atoi(rest[:colonIdx])
 	if err != nil {
-		return nil, fmt.Errorf("pflog: invalid PID %q: %w", rest[:colonIdx], err)
+		return nil, &PIDError{PID: rest[:colonIdx], Err: err}
 	}
 	msg := rest[colonIdx+3:]
 
