@@ -186,10 +186,14 @@ var monthNames = [12]string{
 type FormatError struct {
 	// Line is the full input line that failed to parse.
 	Line string
+	// Reason is a short description of what part of the format was not
+	// recognised (e.g., "line too short", "missing hostname",
+	// "missing PID bracket", "missing message separator").
+	Reason string
 }
 
 func (e *FormatError) Error() string {
-	return fmt.Sprintf("pflog: invalid syslog format: %q", e.Line)
+	return fmt.Sprintf("pflog: invalid syslog format (%s): %q", e.Reason, e.Line)
 }
 
 // TimestampError is returned by [Parse] when the timestamp portion of the
@@ -238,7 +242,7 @@ func Parse(line string) (*Record, error) {
 	// The BSD syslog timestamp is always exactly 15 characters: "Mmm _D HH:MM:SS"
 	const tsLen = 15
 	if len(line) <= tsLen || line[tsLen] != ' ' {
-		return nil, &FormatError{Line: line}
+		return nil, &FormatError{Line: line, Reason: "line too short"}
 	}
 
 	ts, err := parseTimestamp(line[:tsLen])
@@ -251,7 +255,7 @@ func Parse(line string) (*Record, error) {
 	// hostname is the next space-delimited token.
 	spaceIdx := strings.IndexByte(rest, ' ')
 	if spaceIdx < 0 {
-		return nil, &FormatError{Line: line}
+		return nil, &FormatError{Line: line, Reason: "missing hostname"}
 	}
 	hostname := rest[:spaceIdx]
 	rest = rest[spaceIdx+1:]
@@ -259,7 +263,7 @@ func Parse(line string) (*Record, error) {
 	// process[pid]: — find the "[" that opens the PID.
 	bracketIdx := strings.IndexByte(rest, '[')
 	if bracketIdx < 0 {
-		return nil, &FormatError{Line: line}
+		return nil, &FormatError{Line: line, Reason: "missing PID bracket"}
 	}
 	processField := rest[:bracketIdx]
 	rest = rest[bracketIdx+1:]
@@ -267,7 +271,7 @@ func Parse(line string) (*Record, error) {
 	// Find "]: " to delimit the PID and the message body.
 	colonIdx := strings.Index(rest, "]: ")
 	if colonIdx < 0 {
-		return nil, &FormatError{Line: line}
+		return nil, &FormatError{Line: line, Reason: "missing message separator"}
 	}
 	pid, err := strconv.Atoi(rest[:colonIdx])
 	if err != nil {
@@ -736,6 +740,9 @@ func parseStats(s string) map[string]int {
 // Lines that do not match the expected syslog format are silently skipped,
 // making it safe to use on mixed syslog files.
 //
+// To be notified when a line is skipped due to a parse error, register a
+// callback with [Scanner.SetErrorHandler] before calling [Scanner.Scan].
+//
 // Usage:
 //
 //	s := pflog.NewScanner(r)
@@ -747,9 +754,10 @@ func parseStats(s string) map[string]int {
 //	    log.Fatal(err)
 //	}
 type Scanner struct {
-	s      *bufio.Scanner
-	record *Record
-	err    error
+	s        *bufio.Scanner
+	record   *Record
+	err      error
+	onError  func(line string, err error)
 }
 
 // NewScanner returns a new Scanner that reads from r.
@@ -757,9 +765,18 @@ func NewScanner(r io.Reader) *Scanner {
 	return &Scanner{s: bufio.NewScanner(r)}
 }
 
+// SetErrorHandler registers fn to be called whenever a line is skipped
+// because it cannot be parsed as a Postfix log entry. fn receives the raw
+// line and the parse error. Passing nil clears a previously set handler.
+// SetErrorHandler must be called before the first call to [Scanner.Scan].
+func (s *Scanner) SetErrorHandler(fn func(line string, err error)) {
+	s.onError = fn
+}
+
 // Scan advances the scanner to the next record and returns true if one is
 // available. It returns false at the end of input or on a read error. Lines
-// that cannot be parsed as Postfix entries are silently skipped.
+// that cannot be parsed as Postfix entries are silently skipped; register an
+// error handler with [Scanner.SetErrorHandler] to observe those errors.
 func (s *Scanner) Scan() bool {
 	for s.s.Scan() {
 		line := s.s.Text()
@@ -768,6 +785,9 @@ func (s *Scanner) Scan() bool {
 		}
 		r, err := Parse(line)
 		if err != nil {
+			if s.onError != nil {
+				s.onError(line, err)
+			}
 			continue
 		}
 		s.record = r
