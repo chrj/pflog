@@ -354,7 +354,7 @@ func extractQueueID(msg string) (queueID, rest string, ok bool) {
 	}
 	for j := 0; j < i; j++ {
 		c := msg[j]
-		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F')) {
+		if (c < '0' || c > '9') && (c < 'A' || c > 'F') {
 			return "", "", false
 		}
 	}
