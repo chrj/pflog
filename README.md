@@ -1,5 +1,7 @@
 # pflog
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/chrj/pflog.svg)](https://pkg.go.dev/github.com/chrj/pflog)
+
 `pflog` is a Go package for parsing [Postfix](https://www.postfix.org/) mail log entries. It handles the standard BSD syslog format that Postfix writes to, turning raw log lines into structured Go values.
 
 ## Features
