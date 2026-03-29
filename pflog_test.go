@@ -47,26 +47,40 @@ func assertTime(t *testing.T, got time.Time, month time.Month, day, hour, min, s
 // ---- invalid input ----------------------------------------------------------
 
 func TestParse_InvalidFormat(t *testing.T) {
-	cases := []string{
-		"",
-		"not a syslog line",
-		"Jan 1 00:00:00 hostname",
-		"random garbage data",
-		"Jan 29 12:34:56 host", // missing process[pid]
+	cases := []struct {
+		line   string
+		reason string
+	}{
+		{"", "line too short"},
+		{"not a syslog line", "line too short"},
+		{"Jan 1 00:00:00 hostname", "line too short"},
+		{"random garbage data", "line too short"},
+		// Has a valid-length timestamp prefix but no hostname after it.
+		{"Jan 29 12:34:56 host", "missing hostname"},
+		// Has hostname but no PID bracket.
+		{"Jan 29 12:34:56 host postfix", "missing PID bracket"},
+		// Has PID bracket but no closing "]: " separator.
+		{"Jan 29 12:34:56 host postfix/smtpd[1]", "missing message separator"},
 	}
-	for _, line := range cases {
-		_, err := pflog.Parse(line)
+	for _, tc := range cases {
+		_, err := pflog.Parse(tc.line)
 		if err == nil {
-			t.Errorf("Parse(%q) error = nil, want an error", line)
+			t.Errorf("Parse(%q) error = nil, want an error", tc.line)
 			continue
 		}
 		var formatErr *pflog.FormatError
 		if !errors.As(err, &formatErr) {
-			t.Errorf("Parse(%q) error type = %T, want *pflog.FormatError", line, err)
+			t.Errorf("Parse(%q) error type = %T, want *pflog.FormatError", tc.line, err)
 			continue
 		}
-		if formatErr.Line != line {
-			t.Errorf("FormatError.Line = %q, want %q", formatErr.Line, line)
+		if formatErr.Line != tc.line {
+			t.Errorf("FormatError.Line = %q, want %q", formatErr.Line, tc.line)
+		}
+		if formatErr.Reason != tc.reason {
+			t.Errorf("Parse(%q) FormatError.Reason = %q, want %q", tc.line, formatErr.Reason, tc.reason)
+		}
+		if formatErr.Error() == "" {
+			t.Errorf("Parse(%q) FormatError.Error() is empty", tc.line)
 		}
 	}
 }
@@ -582,6 +596,49 @@ func TestScanner_SkipsInvalidLines(t *testing.T) {
 	}
 	if count != 2 {
 		t.Errorf("scanned %d records, want 2", count)
+	}
+}
+
+func TestScanner_ErrorHandler(t *testing.T) {
+	input := strings.Join([]string{
+		`this is not a syslog line`,
+		`Mar 29 12:34:56 host postfix/qmgr[1]: ABCDE12345: removed`,
+		`another garbage line`,
+		`Mar 29 12:34:57 host postfix/smtpd[2]: connect from unknown[1.2.3.4]`,
+	}, "\n")
+
+	s := pflog.NewScanner(strings.NewReader(input))
+
+	var errLines []string
+	var errs []error
+	s.SetErrorHandler(func(line string, err error) {
+		errLines = append(errLines, line)
+		errs = append(errs, err)
+	})
+
+	var count int
+	for s.Scan() {
+		count++
+	}
+	if err := s.Err(); err != nil {
+		t.Fatalf("Scanner.Err() = %v", err)
+	}
+	if count != 2 {
+		t.Errorf("scanned %d records, want 2", count)
+	}
+	if len(errLines) != 2 {
+		t.Fatalf("error handler called %d times, want 2", len(errLines))
+	}
+	if errLines[0] != "this is not a syslog line" {
+		t.Errorf("errLines[0] = %q, want %q", errLines[0], "this is not a syslog line")
+	}
+	if errLines[1] != "another garbage line" {
+		t.Errorf("errLines[1] = %q, want %q", errLines[1], "another garbage line")
+	}
+	for i, err := range errs {
+		if err == nil {
+			t.Errorf("errs[%d] is nil, want a non-nil error", i)
+		}
 	}
 }
 
