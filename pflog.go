@@ -17,7 +17,6 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -176,51 +175,11 @@ type Unknown struct {
 
 func (Unknown) isMessage() {}
 
-// compiled regular expressions used by Parse.
-var (
-	// syslogRe matches the BSD syslog header produced by Postfix:
-	//   "Jan  1 00:00:00 hostname postfix/daemon[pid]: message"
-	syslogRe = regexp.MustCompile(
-		`^(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+(\S+)\s+([\w./-]+)\[(\d+)\]:\s+(.*)$`,
-	)
-
-	// queueIDRe matches an optional Postfix queue ID prefix:
-	//   "QUEUEID: rest"  or  "NOQUEUE: rest"
-	queueIDRe = regexp.MustCompile(`^([0-9A-F]{6,20}|NOQUEUE):\s+(.*)$`)
-
-	// connectRe matches: "connect from hostname[ip]"
-	connectRe = regexp.MustCompile(`^connect from (\S+)\[([^\]]+)\]$`)
-
-	// disconnectRe matches: "disconnect from hostname[ip] [stats…]"
-	disconnectRe = regexp.MustCompile(`^disconnect from (\S+)\[([^\]]+)\](.*)$`)
-
-	// queuedRe matches the qmgr active-queue entry:
-	//   "from=<addr>, size=N, nrcpt=N (queue active)"
-	queuedRe = regexp.MustCompile(`^from=<([^>]*)>,\s+size=(\d+),\s+nrcpt=(\d+)\s+\(`)
-
-	// removedRe matches the qmgr removal message.
-	removedRe = regexp.MustCompile(`^removed$`)
-
-	// cleanupRe matches: "message-id=<value>"
-	cleanupRe = regexp.MustCompile(`^message-id=<([^>]*)>$`)
-
-	// deliveryRe matches smtp/local/virtual/lmtp/pipe delivery lines:
-	//   "to=<addr>, relay=host, delay=N, delays=N, dsn=N, status=word (detail)"
-	deliveryRe = regexp.MustCompile(
-		`^to=<([^>]*)>,\s+relay=([^,]+),\s+delay=([^,]+),\s+delays=([^,]+),\s+dsn=([^,]+),\s+status=(\w+)\s+\((.+)\)$`,
-	)
-
-	// rejectRe matches rejection messages:
-	//   "reject: STAGE from hostname[ip]: code detail"
-	rejectRe = regexp.MustCompile(`^reject:\s+(\w+)\s+from\s+(\S+)\[([^\]]+)\]:\s+(\d+)\s+(.+)$`)
-
-	// bounceRe matches the bounce daemon notification:
-	//   "sender non-delivery notification: QUEUEID"
-	bounceRe = regexp.MustCompile(`^sender non-delivery notification:\s+([0-9A-F]+)$`)
-
-	// warningRe matches: "warning: text"
-	warningRe = regexp.MustCompile(`^warning:\s+(.+)$`)
-)
+// monthNames maps 0–11 to the BSD syslog month abbreviations used by Postfix.
+var monthNames = [12]string{
+	"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+	"Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+}
 
 // Parse parses a single Postfix log line and returns a [Record].
 //
@@ -232,133 +191,497 @@ var (
 // header. If the message body cannot be parsed into a specific type, the
 // [Record.Message] field is set to [Unknown] and no error is returned.
 func Parse(line string) (*Record, error) {
-	m := syslogRe.FindStringSubmatch(line)
-	if m == nil {
+	// The BSD syslog timestamp is always exactly 15 characters: "Mmm _D HH:MM:SS"
+	const tsLen = 15
+	if len(line) <= tsLen || line[tsLen] != ' ' {
 		return nil, fmt.Errorf("pflog: invalid syslog format: %q", line)
 	}
 
-	ts, err := parseTimestamp(m[1])
+	ts, err := parseTimestamp(line[:tsLen])
 	if err != nil {
-		return nil, fmt.Errorf("pflog: invalid timestamp %q: %w", m[1], err)
+		return nil, fmt.Errorf("pflog: invalid timestamp %q: %w", line[:tsLen], err)
 	}
 
-	pid, err := strconv.Atoi(m[4])
-	if err != nil {
-		return nil, fmt.Errorf("pflog: invalid PID %q: %w", m[4], err)
+	rest := line[tsLen+1:]
+
+	// hostname is the next space-delimited token.
+	spaceIdx := strings.IndexByte(rest, ' ')
+	if spaceIdx < 0 {
+		return nil, fmt.Errorf("pflog: invalid syslog format: %q", line)
 	}
+	hostname := rest[:spaceIdx]
+	rest = rest[spaceIdx+1:]
+
+	// process[pid]: — find the "[" that opens the PID.
+	bracketIdx := strings.IndexByte(rest, '[')
+	if bracketIdx < 0 {
+		return nil, fmt.Errorf("pflog: invalid syslog format: %q", line)
+	}
+	processField := rest[:bracketIdx]
+	rest = rest[bracketIdx+1:]
+
+	// Find "]: " to delimit the PID and the message body.
+	colonIdx := strings.Index(rest, "]: ")
+	if colonIdx < 0 {
+		return nil, fmt.Errorf("pflog: invalid syslog format: %q", line)
+	}
+	pid, err := strconv.Atoi(rest[:colonIdx])
+	if err != nil {
+		return nil, fmt.Errorf("pflog: invalid PID %q: %w", rest[:colonIdx], err)
+	}
+	msg := rest[colonIdx+3:]
 
 	// Extract the daemon name from "postfix/daemon" or a plain name.
-	process := m[3]
-	if idx := strings.LastIndex(process, "/"); idx >= 0 {
-		process = process[idx+1:]
+	process := processField
+	if idx := strings.LastIndexByte(processField, '/'); idx >= 0 {
+		process = processField[idx+1:]
 	}
 
 	r := &Record{
 		Time:     ts,
-		Hostname: m[2],
+		Hostname: hostname,
 		Process:  process,
 		PID:      pid,
 	}
 
-	msg := m[5]
-
 	// Extract the queue ID prefix when present.
-	if qm := queueIDRe.FindStringSubmatch(msg); qm != nil {
-		r.QueueID = qm[1]
-		msg = qm[2]
+	if queueID, remainder, ok := extractQueueID(msg); ok {
+		r.QueueID = queueID
+		msg = remainder
 	}
 
 	r.Message = parseMessage(msg)
 	return r, nil
 }
 
-// parseTimestamp parses a BSD syslog timestamp ("Jan  1 00:00:00") and
-// returns a time.Time in UTC with the current year applied.
+// parseTimestamp parses a 15-character BSD syslog timestamp ("Jan  1 00:00:00")
+// and returns a time.Time in UTC with the current year applied.
 func parseTimestamp(s string) (time.Time, error) {
-	t, err := time.Parse("Jan _2 15:04:05", s)
-	if err != nil {
-		return time.Time{}, err
+	if len(s) != 15 {
+		return time.Time{}, fmt.Errorf("wrong length")
 	}
+
+	// Month: s[0:3]
+	var month time.Month
+	for i, name := range monthNames {
+		if s[0] == name[0] && s[1] == name[1] && s[2] == name[2] {
+			month = time.Month(i + 1)
+			break
+		}
+	}
+	if month == 0 {
+		return time.Time{}, fmt.Errorf("unknown month")
+	}
+
+	if s[3] != ' ' {
+		return time.Time{}, fmt.Errorf("expected space after month")
+	}
+
+	// Day: s[4:6], space-padded (e.g., " 1" or "29").
+	day, ok := parsePaddedInt2(s[4], s[5])
+	if !ok {
+		return time.Time{}, fmt.Errorf("invalid day")
+	}
+
+	if s[6] != ' ' {
+		return time.Time{}, fmt.Errorf("expected space after day")
+	}
+
+	hour, ok := parseInt2(s[7], s[8])
+	if !ok {
+		return time.Time{}, fmt.Errorf("invalid hour")
+	}
+
+	if s[9] != ':' {
+		return time.Time{}, fmt.Errorf("expected ':' after hour")
+	}
+
+	min, ok := parseInt2(s[10], s[11])
+	if !ok {
+		return time.Time{}, fmt.Errorf("invalid minute")
+	}
+
+	if s[12] != ':' {
+		return time.Time{}, fmt.Errorf("expected ':' after minute")
+	}
+
+	sec, ok := parseInt2(s[13], s[14])
+	if !ok {
+		return time.Time{}, fmt.Errorf("invalid second")
+	}
+
 	now := time.Now().UTC()
-	return time.Date(now.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, time.UTC), nil
+	return time.Date(now.Year(), month, day, hour, min, sec, 0, time.UTC), nil
+}
+
+// parsePaddedInt2 parses a space-or-digit followed by a digit (e.g., " 1" → 1, "29" → 29).
+func parsePaddedInt2(a, b byte) (int, bool) {
+	var tens int
+	if a == ' ' {
+		tens = 0
+	} else if a >= '0' && a <= '9' {
+		tens = int(a-'0') * 10
+	} else {
+		return 0, false
+	}
+	if b < '0' || b > '9' {
+		return 0, false
+	}
+	return tens + int(b-'0'), true
+}
+
+// parseInt2 parses exactly two decimal digit bytes.
+func parseInt2(a, b byte) (int, bool) {
+	if a < '0' || a > '9' || b < '0' || b > '9' {
+		return 0, false
+	}
+	return int(a-'0')*10 + int(b-'0'), true
+}
+
+// extractQueueID parses an optional Postfix queue ID prefix from msg.
+// It recognises uppercase hex IDs (6–20 chars) and the literal "NOQUEUE".
+func extractQueueID(msg string) (queueID, rest string, ok bool) {
+	i := strings.Index(msg, ": ")
+	if i < 0 {
+		return "", "", false
+	}
+	prefix := msg[:i]
+	if prefix == "NOQUEUE" {
+		return prefix, msg[i+2:], true
+	}
+	if i < 6 || i > 20 {
+		return "", "", false
+	}
+	for j := 0; j < i; j++ {
+		c := msg[j]
+		if (c < '0' || c > '9') && (c < 'A' || c > 'F') {
+			return "", "", false
+		}
+	}
+	return prefix, msg[i+2:], true
 }
 
 // parseMessage tries each known pattern in turn and returns the first match.
 // It falls back to Unknown when nothing matches.
 func parseMessage(msg string) Message {
-	if m := connectRe.FindStringSubmatch(msg); m != nil {
-		return Connect{Hostname: m[1], IP: m[2]}
+	if m, ok := parseConnect(msg); ok {
+		return m
 	}
-
-	if m := disconnectRe.FindStringSubmatch(msg); m != nil {
-		return Disconnect{
-			Hostname: m[1],
-			IP:       m[2],
-			Stats:    parseStats(strings.TrimSpace(m[3])),
-		}
+	if m, ok := parseDisconnect(msg); ok {
+		return m
 	}
-
-	if removedRe.MatchString(msg) {
+	if msg == "removed" {
 		return Removed{}
 	}
-
-	if m := cleanupRe.FindStringSubmatch(msg); m != nil {
-		return Cleanup{MessageID: m[1]}
+	if m, ok := parseCleanup(msg); ok {
+		return m
 	}
-
-	if m := queuedRe.FindStringSubmatch(msg); m != nil {
-		size, _ := strconv.Atoi(m[2])
-		nrcpt, _ := strconv.Atoi(m[3])
-		return Queued{From: m[1], Size: size, NRcpt: nrcpt}
+	if m, ok := parseQueued(msg); ok {
+		return m
 	}
-
-	if m := deliveryRe.FindStringSubmatch(msg); m != nil {
-		return Delivery{
-			To:     m[1],
-			Relay:  strings.TrimSpace(m[2]),
-			Delay:  strings.TrimSpace(m[3]),
-			Delays: strings.TrimSpace(m[4]),
-			DSN:    strings.TrimSpace(m[5]),
-			Status: DeliveryStatus(m[6]),
-			Detail: m[7],
-		}
+	if m, ok := parseDelivery(msg); ok {
+		return m
 	}
-
-	if m := rejectRe.FindStringSubmatch(msg); m != nil {
-		code, _ := strconv.Atoi(m[4])
-		return Reject{
-			Stage:          m[1],
-			ClientHostname: m[2],
-			ClientIP:       m[3],
-			Code:           code,
-			Detail:         m[5],
-		}
+	if m, ok := parseReject(msg); ok {
+		return m
 	}
-
-	if m := bounceRe.FindStringSubmatch(msg); m != nil {
-		return BounceNotification{BounceQueueID: m[1]}
+	if m, ok := parseBounce(msg); ok {
+		return m
 	}
-
-	if m := warningRe.FindStringSubmatch(msg); m != nil {
-		return Warning{Text: m[1]}
+	if m, ok := parseWarning(msg); ok {
+		return m
 	}
-
 	return Unknown{Text: msg}
+}
+
+func parseConnect(msg string) (Connect, bool) {
+	const prefix = "connect from "
+	if !strings.HasPrefix(msg, prefix) {
+		return Connect{}, false
+	}
+	rest := msg[len(prefix):]
+	// hostname ends just before the last "["; IP is between "[" and trailing "]".
+	bracketOpen := strings.LastIndexByte(rest, '[')
+	if bracketOpen < 0 || rest[len(rest)-1] != ']' {
+		return Connect{}, false
+	}
+	return Connect{
+		Hostname: rest[:bracketOpen],
+		IP:       rest[bracketOpen+1 : len(rest)-1],
+	}, true
+}
+
+func parseDisconnect(msg string) (Disconnect, bool) {
+	const prefix = "disconnect from "
+	if !strings.HasPrefix(msg, prefix) {
+		return Disconnect{}, false
+	}
+	rest := msg[len(prefix):]
+	bracketOpen := strings.IndexByte(rest, '[')
+	if bracketOpen < 0 {
+		return Disconnect{}, false
+	}
+	closeOff := strings.IndexByte(rest[bracketOpen:], ']')
+	if closeOff < 0 {
+		return Disconnect{}, false
+	}
+	bracketClose := bracketOpen + closeOff
+	var statsStr string
+	if bracketClose+1 < len(rest) {
+		statsStr = strings.TrimSpace(rest[bracketClose+1:])
+	}
+	return Disconnect{
+		Hostname: rest[:bracketOpen],
+		IP:       rest[bracketOpen+1 : bracketClose],
+		Stats:    parseStats(statsStr),
+	}, true
+}
+
+func parseCleanup(msg string) (Cleanup, bool) {
+	const prefix = "message-id=<"
+	if len(msg) <= len(prefix) || !strings.HasPrefix(msg, prefix) || msg[len(msg)-1] != '>' {
+		return Cleanup{}, false
+	}
+	return Cleanup{MessageID: msg[len(prefix) : len(msg)-1]}, true
+}
+
+func parseQueued(msg string) (Queued, bool) {
+	const fromPrefix = "from=<"
+	if !strings.HasPrefix(msg, fromPrefix) {
+		return Queued{}, false
+	}
+	rest := msg[len(fromPrefix):]
+
+	gtIdx := strings.IndexByte(rest, '>')
+	if gtIdx < 0 {
+		return Queued{}, false
+	}
+	from := rest[:gtIdx]
+	rest = rest[gtIdx+1:]
+
+	const sizePrefix = ", size="
+	if !strings.HasPrefix(rest, sizePrefix) {
+		return Queued{}, false
+	}
+	rest = rest[len(sizePrefix):]
+
+	commaIdx := strings.IndexByte(rest, ',')
+	if commaIdx < 0 {
+		return Queued{}, false
+	}
+	size, err := strconv.Atoi(rest[:commaIdx])
+	if err != nil {
+		return Queued{}, false
+	}
+	rest = rest[commaIdx+1:]
+
+	const nrcptPrefix = " nrcpt="
+	if !strings.HasPrefix(rest, nrcptPrefix) {
+		return Queued{}, false
+	}
+	rest = rest[len(nrcptPrefix):]
+
+	spaceIdx := strings.IndexByte(rest, ' ')
+	if spaceIdx < 0 {
+		return Queued{}, false
+	}
+	nrcpt, err := strconv.Atoi(rest[:spaceIdx])
+	if err != nil {
+		return Queued{}, false
+	}
+	return Queued{From: from, Size: size, NRcpt: nrcpt}, true
+}
+
+func parseDelivery(msg string) (Delivery, bool) {
+	const toPrefix = "to=<"
+	if !strings.HasPrefix(msg, toPrefix) {
+		return Delivery{}, false
+	}
+	rest := msg[len(toPrefix):]
+
+	i := strings.IndexByte(rest, '>')
+	if i < 0 {
+		return Delivery{}, false
+	}
+	to := rest[:i]
+	rest = rest[i+1:]
+
+	const relayPrefix = ", relay="
+	if !strings.HasPrefix(rest, relayPrefix) {
+		return Delivery{}, false
+	}
+	rest = rest[len(relayPrefix):]
+
+	i = strings.IndexByte(rest, ',')
+	if i < 0 {
+		return Delivery{}, false
+	}
+	relay := strings.TrimSpace(rest[:i])
+	rest = rest[i+1:]
+
+	const delayPrefix = " delay="
+	if !strings.HasPrefix(rest, delayPrefix) {
+		return Delivery{}, false
+	}
+	rest = rest[len(delayPrefix):]
+
+	i = strings.IndexByte(rest, ',')
+	if i < 0 {
+		return Delivery{}, false
+	}
+	delay := strings.TrimSpace(rest[:i])
+	rest = rest[i+1:]
+
+	const delaysPrefix = " delays="
+	if !strings.HasPrefix(rest, delaysPrefix) {
+		return Delivery{}, false
+	}
+	rest = rest[len(delaysPrefix):]
+
+	i = strings.IndexByte(rest, ',')
+	if i < 0 {
+		return Delivery{}, false
+	}
+	delays := strings.TrimSpace(rest[:i])
+	rest = rest[i+1:]
+
+	const dsnPrefix = " dsn="
+	if !strings.HasPrefix(rest, dsnPrefix) {
+		return Delivery{}, false
+	}
+	rest = rest[len(dsnPrefix):]
+
+	i = strings.IndexByte(rest, ',')
+	if i < 0 {
+		return Delivery{}, false
+	}
+	dsn := strings.TrimSpace(rest[:i])
+	rest = rest[i+1:]
+
+	const statusPrefix = " status="
+	if !strings.HasPrefix(rest, statusPrefix) {
+		return Delivery{}, false
+	}
+	rest = rest[len(statusPrefix):]
+
+	i = strings.Index(rest, " (")
+	if i < 0 {
+		return Delivery{}, false
+	}
+	status := rest[:i]
+	rest = rest[i+2:]
+
+	if len(rest) == 0 || rest[len(rest)-1] != ')' {
+		return Delivery{}, false
+	}
+	detail := rest[:len(rest)-1]
+
+	return Delivery{
+		To:     to,
+		Relay:  relay,
+		Delay:  delay,
+		Delays: delays,
+		DSN:    dsn,
+		Status: DeliveryStatus(status),
+		Detail: detail,
+	}, true
+}
+
+func parseReject(msg string) (Reject, bool) {
+	const rejectPrefix = "reject: "
+	if !strings.HasPrefix(msg, rejectPrefix) {
+		return Reject{}, false
+	}
+	rest := msg[len(rejectPrefix):]
+
+	// Stage is the first word.
+	i := strings.IndexByte(rest, ' ')
+	if i < 0 {
+		return Reject{}, false
+	}
+	stage := rest[:i]
+	rest = rest[i+1:]
+
+	const fromPrefix = "from "
+	if !strings.HasPrefix(rest, fromPrefix) {
+		return Reject{}, false
+	}
+	rest = rest[len(fromPrefix):]
+
+	// "hostname[ip]: code detail"
+	bracketOpen := strings.IndexByte(rest, '[')
+	if bracketOpen < 0 {
+		return Reject{}, false
+	}
+	clientHostname := rest[:bracketOpen]
+	rest = rest[bracketOpen+1:]
+
+	bracketClose := strings.IndexByte(rest, ']')
+	if bracketClose < 0 {
+		return Reject{}, false
+	}
+	clientIP := rest[:bracketClose]
+	rest = rest[bracketClose+1:]
+
+	const colonPrefix = ": "
+	if !strings.HasPrefix(rest, colonPrefix) {
+		return Reject{}, false
+	}
+	rest = rest[len(colonPrefix):]
+
+	i = strings.IndexByte(rest, ' ')
+	if i < 0 {
+		return Reject{}, false
+	}
+	code, err := strconv.Atoi(rest[:i])
+	if err != nil {
+		return Reject{}, false
+	}
+
+	return Reject{
+		Stage:          stage,
+		ClientHostname: clientHostname,
+		ClientIP:       clientIP,
+		Code:           code,
+		Detail:         rest[i+1:],
+	}, true
+}
+
+func parseBounce(msg string) (BounceNotification, bool) {
+	const prefix = "sender non-delivery notification: "
+	if !strings.HasPrefix(msg, prefix) {
+		return BounceNotification{}, false
+	}
+	return BounceNotification{BounceQueueID: msg[len(prefix):]}, true
+}
+
+func parseWarning(msg string) (Warning, bool) {
+	const prefix = "warning: "
+	if !strings.HasPrefix(msg, prefix) {
+		return Warning{}, false
+	}
+	return Warning{Text: msg[len(prefix):]}, true
 }
 
 // parseStats parses space-separated "key=value" pairs such as
 // "ehlo=1 mail=1 rcpt=1 data=1 quit=1 commands=5".
 // Non-integer values are silently ignored.
+// Returns nil when s is empty.
 func parseStats(s string) map[string]int {
-	stats := make(map[string]int)
 	if s == "" {
-		return stats
+		return nil
 	}
-	for _, part := range strings.Fields(s) {
-		kv := strings.SplitN(part, "=", 2)
-		if len(kv) == 2 {
-			if v, err := strconv.Atoi(kv[1]); err == nil {
-				stats[kv[0]] = v
+	stats := make(map[string]int)
+	for s != "" {
+		var part string
+		if i := strings.IndexByte(s, ' '); i >= 0 {
+			part, s = s[:i], s[i+1:]
+		} else {
+			part, s = s, ""
+		}
+		if i := strings.IndexByte(part, '='); i >= 0 {
+			if v, err := strconv.Atoi(part[i+1:]); err == nil {
+				stats[part[:i]] = v
 			}
 		}
 	}
