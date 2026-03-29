@@ -1,6 +1,7 @@
 package pflog_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -57,7 +58,59 @@ func TestParse_InvalidFormat(t *testing.T) {
 		_, err := pflog.Parse(line)
 		if err == nil {
 			t.Errorf("Parse(%q) error = nil, want an error", line)
+			continue
 		}
+		var formatErr *pflog.FormatError
+		if !errors.As(err, &formatErr) {
+			t.Errorf("Parse(%q) error type = %T, want *pflog.FormatError", line, err)
+			continue
+		}
+		if formatErr.Line != line {
+			t.Errorf("FormatError.Line = %q, want %q", formatErr.Line, line)
+		}
+	}
+}
+
+func TestParse_InvalidTimestamp(t *testing.T) {
+	// A line with the right structure but a bad timestamp.
+	line := "Xxx 99 99:99:99 host postfix/smtpd[1]: connect from host[1.2.3.4]"
+	_, err := pflog.Parse(line)
+	if err == nil {
+		t.Fatalf("Parse(%q) error = nil, want an error", line)
+	}
+	var tsErr *pflog.TimestampError
+	if !errors.As(err, &tsErr) {
+		t.Fatalf("Parse(%q) error type = %T, want *pflog.TimestampError", line, err)
+	}
+	if tsErr.Timestamp == "" {
+		t.Error("TimestampError.Timestamp is empty")
+	}
+	if tsErr.Err == nil {
+		t.Error("TimestampError.Err is nil, want an underlying error")
+	}
+	if errors.Unwrap(err) == nil {
+		t.Error("errors.Unwrap returned nil, want an underlying error")
+	}
+}
+
+func TestParse_InvalidPID(t *testing.T) {
+	line := "Jan  1 00:00:00 host postfix/smtpd[abc]: connect from host[1.2.3.4]"
+	_, err := pflog.Parse(line)
+	if err == nil {
+		t.Fatalf("Parse(%q) error = nil, want an error", line)
+	}
+	var pidErr *pflog.PIDError
+	if !errors.As(err, &pidErr) {
+		t.Fatalf("Parse(%q) error type = %T, want *pflog.PIDError", line, err)
+	}
+	if pidErr.PID != "abc" {
+		t.Errorf("PIDError.PID = %q, want %q", pidErr.PID, "abc")
+	}
+	if pidErr.Err == nil {
+		t.Error("PIDError.Err is nil, want an underlying error")
+	}
+	if errors.Unwrap(err) == nil {
+		t.Error("errors.Unwrap returned nil, want an underlying error")
 	}
 }
 
