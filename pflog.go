@@ -326,7 +326,7 @@ func parseTimestamp(s string) (time.Time, error) {
 	}
 
 	// Day: s[4:6], space-padded (e.g., " 1" or "29").
-	day, ok := parsePaddedInt2(s[4], s[5])
+	day, ok := parseSpacePaddedInt(s[4], s[5])
 	if !ok {
 		return time.Time{}, fmt.Errorf("invalid day")
 	}
@@ -335,7 +335,7 @@ func parseTimestamp(s string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("expected space after day")
 	}
 
-	hour, ok := parseInt2(s[7], s[8])
+	hour, ok := parseTwoDigitInt(s[7], s[8])
 	if !ok {
 		return time.Time{}, fmt.Errorf("invalid hour")
 	}
@@ -344,7 +344,7 @@ func parseTimestamp(s string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("expected ':' after hour")
 	}
 
-	min, ok := parseInt2(s[10], s[11])
+	min, ok := parseTwoDigitInt(s[10], s[11])
 	if !ok {
 		return time.Time{}, fmt.Errorf("invalid minute")
 	}
@@ -353,7 +353,7 @@ func parseTimestamp(s string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("expected ':' after minute")
 	}
 
-	sec, ok := parseInt2(s[13], s[14])
+	sec, ok := parseTwoDigitInt(s[13], s[14])
 	if !ok {
 		return time.Time{}, fmt.Errorf("invalid second")
 	}
@@ -362,8 +362,8 @@ func parseTimestamp(s string) (time.Time, error) {
 	return time.Date(now.Year(), month, day, hour, min, sec, 0, time.UTC), nil
 }
 
-// parsePaddedInt2 parses a space-or-digit followed by a digit (e.g., " 1" → 1, "29" → 29).
-func parsePaddedInt2(a, b byte) (int, bool) {
+// parseSpacePaddedInt parses a space-or-digit followed by a digit (e.g., " 1" → 1, "29" → 29).
+func parseSpacePaddedInt(a, b byte) (int, bool) {
 	var tens int
 	if a == ' ' {
 		tens = 0
@@ -378,8 +378,8 @@ func parsePaddedInt2(a, b byte) (int, bool) {
 	return tens + int(b-'0'), true
 }
 
-// parseInt2 parses exactly two decimal digit bytes.
-func parseInt2(a, b byte) (int, bool) {
+// parseTwoDigitInt parses exactly two decimal digit bytes.
+func parseTwoDigitInt(a, b byte) (int, bool) {
 	if a < '0' || a > '9' || b < '0' || b > '9' {
 		return 0, false
 	}
