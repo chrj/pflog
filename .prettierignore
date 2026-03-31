@@ -1,0 +1,4 @@
+# Go files (formatted by gofmt/golangci-lint)
+*.go
+go.mod
+go.sum

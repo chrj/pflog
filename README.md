@@ -14,15 +14,15 @@
 
 Measured on an AMD EPYC 7763 with `go test -bench=. -benchmem`:
 
-| Benchmark | ns/op | B/op | allocs/op |
-|---|---:|---:|---:|
-| `Parse` — Connect | 203 | 128 | 2 |
-| `Parse` — Disconnect (with stats) | 500 | 400 | 4 |
-| `Parse` — Queued | 261 | 128 | 2 |
-| `Parse` — Delivery | 328 | 208 | 2 |
-| `Parse` — Reject | 303 | 176 | 2 |
-| `Parse` — Unknown | 230 | 112 | 2 |
-| `Scanner` — 10 mixed lines | 4,484 | 6,848 | 33 |
+| Benchmark                         | ns/op |  B/op | allocs/op |
+| --------------------------------- | ----: | ----: | --------: |
+| `Parse` — Connect                 |   203 |   128 |         2 |
+| `Parse` — Disconnect (with stats) |   500 |   400 |         4 |
+| `Parse` — Queued                  |   261 |   128 |         2 |
+| `Parse` — Delivery                |   328 |   208 |         2 |
+| `Parse` — Reject                  |   303 |   176 |         2 |
+| `Parse` — Unknown                 |   230 |   112 |         2 |
+| `Scanner` — 10 mixed lines        | 4,484 | 6,848 |        33 |
 
 ## Installation
 

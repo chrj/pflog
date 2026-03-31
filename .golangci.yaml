@@ -1,0 +1,14 @@
+version: "2"
+
+run:
+  concurrency: 4
+  issues-exit-code: 1
+  timeout: 5m
+
+linters:
+  settings:
+    staticcheck:
+      checks:
+        - "all"
+        - "-S1023" # redundant return statement
+        - "-ST1003" # camelCase for constants, no way

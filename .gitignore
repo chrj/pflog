@@ -24,6 +24,9 @@ profile.cov
 go.work
 go.work.sum
 
+# Node modules (commitlint, prettier)
+node_modules/
+
 # env file
 .env
 

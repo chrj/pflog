@@ -1,0 +1,66 @@
+name: Semantic Versioning and Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  semantic-release:
+    name: Semantic Versioning and Release
+    runs-on: ubuntu-latest
+
+    permissions:
+      issues: write
+      contents: write
+      id-token: write
+      pull-requests: write
+
+    steps:
+      - name: Create temporary GitHub App Token
+        id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          owner: ${{ github.repository_owner }}
+          app-id: ${{ vars.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+
+      - name: Checkout and setup as app bot
+        uses: alchemaxinc/composite-toolbox/checkout-and-setup@v1
+        with:
+          shallow: false
+          app-slug: ${{ vars.BOT_APP_SLUG }}
+          token: ${{ steps.app.outputs.token }}
+
+      - name: Cache semantic-release
+        id: cache-sr
+        uses: actions/cache@v5
+        with:
+          path: ~/.npm-global
+          key: npm-sr-${{ runner.os }}-${{ hashFiles('**/package.json') }}
+          restore-keys: |
+            npm-sr-${{ runner.os }}-
+
+      - name: Install semantic-release and plugins
+        if: steps.cache-sr.outputs.cache-hit != 'true'
+        run: |
+          npm config set prefix ~/.npm-global
+          npm install -g \
+            semantic-release \
+            @semantic-release/commit-analyzer \
+            @semantic-release/release-notes-generator \
+            @semantic-release/npm \
+            @semantic-release/github
+
+      - name: Add ~/.npm-global/bin to PATH
+        run: echo "~/.npm-global/bin" >> $GITHUB_PATH
+
+      - name: Run semantic-release
+        env:
+          GITHUB_TOKEN: ${{ steps.app.outputs.token }}
+        run: semantic-release
