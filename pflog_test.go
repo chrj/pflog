@@ -2,6 +2,7 @@ package pflog_test
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -1070,6 +1071,122 @@ func TestScanner_ReadError(t *testing.T) {
 type errReader struct{ err error }
 
 func (r *errReader) Read([]byte) (int, error) { return 0, r.err }
+
+// io.Reader allows a reader to give data and an error in the same call. The
+// data must still reach the caller, and the error must arrive after it.
+func TestScanner_ReadErrorWithFinalLine(t *testing.T) {
+	want := errors.New("boom")
+	cases := []struct {
+		name string
+		data string
+	}{
+		{"no trailing newline", `Mar 29 12:34:56 host postfix/qmgr[1]: ABCDE12345: removed`},
+		{"trailing newline", "Mar 29 12:34:56 host postfix/qmgr[1]: ABCDE12345: removed\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := pflog.NewScanner(&dataThenErrReader{data: tc.data, err: want})
+
+			var count int
+			for s.Scan() {
+				if _, ok := s.Record().Message.(pflog.Removed); !ok {
+					t.Errorf("Message type = %T, want Removed", s.Record().Message)
+				}
+				count++
+			}
+			if count != 1 {
+				t.Errorf("scanned %d records, want 1", count)
+			}
+			if !errors.Is(s.Err(), want) {
+				t.Errorf("Err() = %v, want %v", s.Err(), want)
+			}
+		})
+	}
+}
+
+// dataThenErrReader gives data and an error in the same Read call.
+type dataThenErrReader struct {
+	data string
+	err  error
+	done bool
+}
+
+func (r *dataThenErrReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, r.err
+	}
+	r.done = true
+	return copy(p, r.data), r.err
+}
+
+// The end-of-line bytes are not part of the line. A line of exactly the limit
+// followed by CRLF is therefore within the limit, not above it.
+func TestScanner_LineExactlyAtLimitWithCRLF(t *testing.T) {
+	const prefix = `Mar 29 12:34:56 host postfix/smtpd[1]: warning: `
+	body := strings.Repeat("z", pflog.DefaultMaxLineLen-len(prefix))
+
+	s := pflog.NewScanner(strings.NewReader(prefix + body + "\r\n"))
+	var skipped error
+	s.SetErrorHandler(func(_ string, err error) { skipped = err })
+
+	if !s.Scan() {
+		t.Fatalf("Scan() = false, want true; skipped = %v, Err() = %v", skipped, s.Err())
+	}
+	w, ok := s.Record().Message.(pflog.Warning)
+	if !ok {
+		t.Fatalf("Message type = %T, want Warning", s.Record().Message)
+	}
+	if w.Text != body {
+		t.Errorf("Warning.Text length = %d, want %d", len(w.Text), len(body))
+	}
+	if skipped != nil {
+		t.Errorf("error handler got %v, want no call", skipped)
+	}
+}
+
+// A CRLF pair can fall across two reads of the buffer inside the reader. The
+// carriage return must still leave the line, whatever the length.
+func TestScanner_CRLFAcrossReads(t *testing.T) {
+	const prefix = `Mar 29 12:34:56 host postfix/smtpd[1]: warning: `
+	// The reader buffer holds 4096 bytes, so these lengths put the carriage
+	// return on both sides of a read boundary.
+	for _, total := range []int{4094, 4095, 4096, 4097, 8192} {
+		t.Run(fmt.Sprintf("%d", total), func(t *testing.T) {
+			body := strings.Repeat("z", total-len(prefix))
+
+			s := pflog.NewScanner(strings.NewReader(prefix + body + "\r\n"))
+			if !s.Scan() {
+				t.Fatalf("Scan() = false, want true; Err() = %v", s.Err())
+			}
+			w, ok := s.Record().Message.(pflog.Warning)
+			if !ok {
+				t.Fatalf("Message type = %T, want Warning", s.Record().Message)
+			}
+			if w.Text != body {
+				t.Errorf("Warning.Text length = %d, want %d", len(w.Text), len(body))
+			}
+		})
+	}
+}
+
+// A CRLF line above the limit must report the length of the line itself,
+// without the end-of-line bytes.
+func TestScanner_OverLongCRLFLineReportsLength(t *testing.T) {
+	line := `Mar 29 12:34:56 host postfix/smtpd[1]: warning: ` + strings.Repeat("z", 70000)
+
+	s := pflog.NewScanner(strings.NewReader(line + "\r\n"))
+	var got *pflog.LineTooLongError
+	s.SetErrorHandler(func(_ string, err error) { errors.As(err, &got) })
+
+	for s.Scan() {
+	}
+	if got == nil {
+		t.Fatal("no LineTooLongError reached the handler")
+	}
+	if got.Len != len(line) {
+		t.Errorf("Len = %d, want %d", got.Len, len(line))
+	}
+}
 
 func TestScanner_Empty(t *testing.T) {
 	s := pflog.NewScanner(strings.NewReader(""))

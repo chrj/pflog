@@ -825,6 +825,7 @@ type Scanner struct {
 	maxLineLen int
 	record     *Record
 	err        error
+	pending    error // read error held back until its data is delivered
 	onError    func(line string, err error)
 }
 
@@ -898,44 +899,80 @@ func (s *Scanner) report(line string, err error) {
 // and the rest of it is read and dropped. The caller thus learns the true
 // length while the memory for one line stays bounded.
 func (s *Scanner) readLine() (string, int, error) {
+	if err := s.pending; err != nil {
+		s.pending = nil
+		return "", 0, err
+	}
+
 	var (
-		buf []byte // filled only when a line spans more than one read
-		n   int    // full length of the line, end-of-line bytes not counted
+		buf  []byte // filled only when a line spans more than one read
+		raw  int    // bytes of the line so far, end-of-line bytes counted
+		prev byte   // last byte of the read before this one
 	)
 	for {
 		chunk, err := s.r.ReadSlice('\n')
-		if err != nil && !errors.Is(err, bufio.ErrBufferFull) && !errors.Is(err, io.EOF) {
-			return "", 0, err
-		}
 
 		if errors.Is(err, bufio.ErrBufferFull) {
-			n += len(chunk)
+			raw += len(chunk)
 			buf = appendUpTo(buf, chunk, s.maxLineLen)
+			if len(chunk) > 0 {
+				prev = chunk[len(chunk)-1]
+			}
 			continue
 		}
 
-		chunk = trimSuffixByte(chunk, '\n')
+		// Any other error ends the line. A reader is allowed to give data and
+		// an error together, so hold the error back until the data is out.
+		if err != nil && !errors.Is(err, io.EOF) {
+			s.pending = err
+		}
+
+		if len(chunk) == 0 && buf == nil {
+			if err := s.pending; err != nil {
+				s.pending = nil
+				return "", 0, err
+			}
+			return "", 0, io.EOF
+		}
+
+		raw += len(chunk)
+		n := raw - eolLen(chunk, prev)
 
 		// A line that arrives in one read needs no copy.
 		if buf == nil {
-			if errors.Is(err, io.EOF) && len(chunk) == 0 {
-				return "", 0, io.EOF
+			if n > s.maxLineLen {
+				return string(chunk[:s.maxLineLen]), n, nil
 			}
-			chunk = trimSuffixByte(chunk, '\r')
-			if len(chunk) > s.maxLineLen {
-				return string(chunk[:s.maxLineLen]), len(chunk), nil
-			}
-			return string(chunk), len(chunk), nil
+			return string(chunk[:n]), n, nil
 		}
 
-		n += len(chunk)
 		buf = appendUpTo(buf, chunk, s.maxLineLen)
-		if n <= s.maxLineLen {
-			buf = trimSuffixByte(buf, '\r')
-			n = len(buf)
+		// The cut already dropped the end-of-line bytes of a line above the
+		// limit. A shorter line still carries them.
+		if len(buf) > n {
+			buf = buf[:n]
 		}
 		return string(buf), n, nil
 	}
+}
+
+// eolLen returns the count of end-of-line bytes at the end of the last read
+// of a line. prev is the last byte of the read before it, which matters when
+// a CRLF pair falls across two reads.
+func eolLen(chunk []byte, prev byte) int {
+	if len(chunk) == 0 || chunk[len(chunk)-1] != '\n' {
+		return 0
+	}
+	if len(chunk) >= 2 {
+		if chunk[len(chunk)-2] == '\r' {
+			return 2
+		}
+		return 1
+	}
+	if prev == '\r' {
+		return 2
+	}
+	return 1
 }
 
 // appendUpTo appends src to dst, but stops when dst holds max bytes.
@@ -948,14 +985,6 @@ func appendUpTo(dst, src []byte, max int) []byte {
 		src = src[:room]
 	}
 	return append(dst, src...)
-}
-
-// trimSuffixByte removes one trailing c from b.
-func trimSuffixByte(b []byte, c byte) []byte {
-	if len(b) > 0 && b[len(b)-1] == c {
-		return b[:len(b)-1]
-	}
-	return b
 }
 
 // Record returns the most recent record parsed by [Scanner.Scan].
