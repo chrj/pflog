@@ -9,6 +9,7 @@
 - Parse individual log lines with `Parse`, or iterate over a log file with `Scanner`.
 - Each entry is returned as a `Record` containing the timestamp, hostname, Postfix daemon name, process ID, queue ID, and a typed `Message`.
 - Recognised message types: `Connect`, `Disconnect`, `Queued`, `Removed`, `Cleanup`, `Delivery`, `Reject`, `BounceNotification`, `Warning`, and `Unknown`.
+- `Scanner` skips a line that it cannot parse, and a line above `SetMaxLineLen`, so one bad line does not stop the scan. Use `SetErrorHandler` to see the skipped lines.
 
 ## Benchmarks
 
@@ -17,13 +18,17 @@ Measured on an AMD EPYC 7R13 with Go 1.26.1. The numbers are the median of
 
 | Benchmark | ns/op | B/op | allocs/op |
 |---|---:|---:|---:|
-| `Parse` — Connect | 231 | 128 | 2 |
-| `Parse` — Disconnect (with stats) | 562 | 400 | 4 |
-| `Parse` — Queued | 305 | 128 | 2 |
-| `Parse` — Delivery | 435 | 224 | 2 |
-| `Parse` — Reject | 319 | 176 | 2 |
-| `Parse` — Unknown | 246 | 112 | 2 |
-| `Scanner` — 10 mixed lines | 5,208 | 6,864 | 33 |
+| `Parse` — Connect | 232 | 128 | 2 |
+| `Parse` — Disconnect (with stats) | 568 | 400 | 4 |
+| `Parse` — Queued | 289 | 128 | 2 |
+| `Parse` — Delivery | 425 | 224 | 2 |
+| `Parse` — Reject | 324 | 176 | 2 |
+| `Parse` — Unknown | 247 | 112 | 2 |
+| `Scanner` — 10 mixed lines | 5,527 | 6,864 | 33 |
+
+The `Scanner` benchmark builds a new scanner for every 10 lines, so it also
+measures the cost to set one up. A scanner that reads 1000 lines takes 443 ns
+for each line.
 
 ## Installation
 
