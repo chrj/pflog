@@ -437,6 +437,132 @@ func TestParse_Delivery_LocalRelay(t *testing.T) {
 
 // ---- Reject -----------------------------------------------------------------
 
+func TestParse_Delivery_OrigTo(t *testing.T) {
+	line := `Mar 29 12:34:56 host postfix/local[9]: ABCDE12345: to=<real@example.com>, orig_to=<alias@example.com>, relay=local, delay=0.05, delays=0.02/0/0/0.03, dsn=2.0.0, status=sent (delivered to mailbox)`
+	r := mustParse(t, line)
+
+	d, ok := r.Message.(pflog.Delivery)
+	if !ok {
+		t.Fatalf("Message type = %T, want Delivery", r.Message)
+	}
+	if d.To != "real@example.com" {
+		t.Errorf("To = %q, want %q", d.To, "real@example.com")
+	}
+	if d.OrigTo != "alias@example.com" {
+		t.Errorf("OrigTo = %q, want %q", d.OrigTo, "alias@example.com")
+	}
+	if d.Relay != "local" {
+		t.Errorf("Relay = %q, want %q", d.Relay, "local")
+	}
+	if d.Status != pflog.StatusSent {
+		t.Errorf("Status = %q, want %q", d.Status, pflog.StatusSent)
+	}
+	if d.Detail != "delivered to mailbox" {
+		t.Errorf("Detail = %q, want %q", d.Detail, "delivered to mailbox")
+	}
+}
+
+func TestParse_Delivery_ConnUse(t *testing.T) {
+	line := `Mar 29 12:34:56 host postfix/smtp[9]: ABCDE12345: to=<user@example.com>, relay=mx.example.com[203.0.113.1]:25, conn_use=3, delay=0.5, delays=0.1/0/0.1/0.3, dsn=2.0.0, status=sent (250 2.0.0 OK)`
+	r := mustParse(t, line)
+
+	d, ok := r.Message.(pflog.Delivery)
+	if !ok {
+		t.Fatalf("Message type = %T, want Delivery", r.Message)
+	}
+	if d.To != "user@example.com" {
+		t.Errorf("To = %q, want %q", d.To, "user@example.com")
+	}
+	if d.Relay != "mx.example.com[203.0.113.1]:25" {
+		t.Errorf("Relay = %q, want %q", d.Relay, "mx.example.com[203.0.113.1]:25")
+	}
+	if d.Delay != "0.5" {
+		t.Errorf("Delay = %q, want %q", d.Delay, "0.5")
+	}
+	if d.DSN != "2.0.0" {
+		t.Errorf("DSN = %q, want %q", d.DSN, "2.0.0")
+	}
+	if d.Status != pflog.StatusSent {
+		t.Errorf("Status = %q, want %q", d.Status, pflog.StatusSent)
+	}
+}
+
+func TestParse_Delivery_OrigToAndConnUse(t *testing.T) {
+	line := `Mar 29 12:34:56 host postfix/smtp[9]: ABCDE12345: to=<real@example.com>, orig_to=<alias@example.com>, relay=mx[203.0.113.1]:25, conn_use=2, delay=1.2, delays=0.1/0/0.1/1, dsn=2.0.0, status=sent (250 OK)`
+	r := mustParse(t, line)
+
+	d, ok := r.Message.(pflog.Delivery)
+	if !ok {
+		t.Fatalf("Message type = %T, want Delivery", r.Message)
+	}
+	if d.To != "real@example.com" {
+		t.Errorf("To = %q, want %q", d.To, "real@example.com")
+	}
+	if d.OrigTo != "alias@example.com" {
+		t.Errorf("OrigTo = %q, want %q", d.OrigTo, "alias@example.com")
+	}
+	if d.Delays != "0.1/0/0.1/1" {
+		t.Errorf("Delays = %q, want %q", d.Delays, "0.1/0/0.1/1")
+	}
+}
+
+// An unrecognised field must not push the record to Unknown, so that a future
+// Postfix field keeps working.
+func TestParse_Delivery_UnknownFieldIgnored(t *testing.T) {
+	line := `Mar 29 12:34:56 host postfix/smtp[9]: ABCDE12345: to=<user@example.com>, relay=mx[203.0.113.1]:25, future_field=xyz, delay=0.5, delays=0/0/0/0.5, dsn=2.0.0, status=sent (250 OK)`
+	r := mustParse(t, line)
+
+	d, ok := r.Message.(pflog.Delivery)
+	if !ok {
+		t.Fatalf("Message type = %T, want Delivery", r.Message)
+	}
+	if d.To != "user@example.com" {
+		t.Errorf("To = %q, want %q", d.To, "user@example.com")
+	}
+	if d.Status != pflog.StatusSent {
+		t.Errorf("Status = %q, want %q", d.Status, pflog.StatusSent)
+	}
+}
+
+// The status detail may contain commas and parentheses. It must survive whole.
+func TestParse_Delivery_DetailWithCommas(t *testing.T) {
+	line := `Mar 29 12:34:56 host postfix/smtp[9]: ABCDE12345: to=<user@example.com>, relay=mx[203.0.113.1]:25, delay=0.5, delays=0/0/0/0.5, dsn=5.1.1, status=bounced (host mx said: 550 5.1.1 no such user, try again (in reply to RCPT TO command))`
+	r := mustParse(t, line)
+
+	d, ok := r.Message.(pflog.Delivery)
+	if !ok {
+		t.Fatalf("Message type = %T, want Delivery", r.Message)
+	}
+	if d.Status != pflog.StatusBounced {
+		t.Errorf("Status = %q, want %q", d.Status, pflog.StatusBounced)
+	}
+	want := "host mx said: 550 5.1.1 no such user, try again (in reply to RCPT TO command)"
+	if d.Detail != want {
+		t.Errorf("Detail = %q, want %q", d.Detail, want)
+	}
+}
+
+// A missing mandatory field must still fall back to Unknown.
+func TestParse_Delivery_MissingFieldsFallBackToUnknown(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+	}{
+		{"no relay", `to=<user@example.com>, delay=0.5, delays=0/0/0/0.5, dsn=2.0.0, status=sent (250 OK)`},
+		{"no status", `to=<user@example.com>, relay=mx[203.0.113.1]:25, delay=0.5, delays=0/0/0/0.5, dsn=2.0.0`},
+		{"unterminated address", `to=<user@example.com, relay=mx[203.0.113.1]:25, status=sent (250 OK)`},
+		{"status without detail", `to=<user@example.com>, relay=mx[203.0.113.1]:25, status=sent`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := mustParse(t, `Mar 29 12:34:56 host postfix/smtp[9]: ABCDE12345: `+tc.msg)
+			if _, ok := r.Message.(pflog.Unknown); !ok {
+				t.Errorf("Message type = %T, want Unknown", r.Message)
+			}
+		})
+	}
+}
+
 func TestParse_Reject(t *testing.T) {
 	cases := []struct {
 		line           string
