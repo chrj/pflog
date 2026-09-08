@@ -390,7 +390,7 @@ func parseTwoDigitInt(a, b byte) (int, bool) {
 }
 
 // extractQueueID parses an optional Postfix queue ID prefix from msg.
-// It recognises uppercase hex IDs (6–20 chars) and the literal "NOQUEUE".
+// It recognises queue IDs of 6-20 characters and the literal "NOQUEUE".
 func extractQueueID(msg string) (queueID, rest string, ok bool) {
 	i := strings.Index(msg, ": ")
 	if i < 0 {
@@ -403,13 +403,47 @@ func extractQueueID(msg string) (queueID, rest string, ok bool) {
 	if i < 6 || i > 20 {
 		return "", "", false
 	}
-	for j := 0; j < i; j++ {
-		c := msg[j]
-		if (c < '0' || c > '9') && (c < 'A' || c > 'F') {
-			return "", "", false
-		}
+	if !isShortQueueID(prefix) && !isLongQueueID(prefix) {
+		return "", "", false
 	}
 	return prefix, msg[i+2:], true
+}
+
+// isShortQueueID reports whether s is a traditional Postfix queue ID. Such an
+// ID holds uppercase hexadecimal digits.
+func isShortQueueID(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+// isLongQueueID reports whether s is a long Postfix queue ID, which Postfix
+// writes when enable_long_queue_ids is yes. Postfix encodes such an ID in a
+// 52-character alphabet: the digits, and the letters of both cases without
+// the vowels.
+//
+// The missing vowels matter here. They keep a word such as "warning" or
+// "reject" out of the alphabet, so the text before the first ": " of those
+// messages cannot look like a queue ID.
+func isLongQueueID(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if !isLongQueueIDByte(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isLongQueueIDByte(c byte) bool {
+	switch c {
+	case 'A', 'E', 'I', 'O', 'U', 'a', 'e', 'i', 'o', 'u':
+		return false
+	}
+	return c >= '0' && c <= '9' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z'
 }
 
 // parseMessage tries each known pattern in turn and returns the first match.

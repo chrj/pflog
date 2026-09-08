@@ -185,6 +185,74 @@ func TestParse_QueueID_Present(t *testing.T) {
 	}
 }
 
+// Postfix writes a long queue ID when enable_long_queue_ids is yes. The ID
+// uses a 52-character alphabet of digits and consonants. The example comes
+// from the postconf(5) manual page.
+func TestParse_QueueID_Long(t *testing.T) {
+	line := `Mar 29 12:34:56 host postfix/qmgr[99]: 3Pt2mN2VXxznjll: removed`
+	r := mustParse(t, line)
+	if r.QueueID != "3Pt2mN2VXxznjll" {
+		t.Errorf("QueueID = %q, want %q", r.QueueID, "3Pt2mN2VXxznjll")
+	}
+	if _, ok := r.Message.(pflog.Removed); !ok {
+		t.Errorf("Message type = %T, want Removed", r.Message)
+	}
+}
+
+func TestParse_QueueID_LongWithDelivery(t *testing.T) {
+	line := `Mar 29 12:34:56 host postfix/smtp[9]: 3Pt2mN2VXxznjll: to=<user@example.com>, relay=mx[203.0.113.1]:25, delay=0.5, delays=0/0/0/0.5, dsn=2.0.0, status=sent (250 OK)`
+	r := mustParse(t, line)
+	if r.QueueID != "3Pt2mN2VXxznjll" {
+		t.Errorf("QueueID = %q, want %q", r.QueueID, "3Pt2mN2VXxznjll")
+	}
+	d, ok := r.Message.(pflog.Delivery)
+	if !ok {
+		t.Fatalf("Message type = %T, want Delivery", r.Message)
+	}
+	if d.To != "user@example.com" {
+		t.Errorf("To = %q, want %q", d.To, "user@example.com")
+	}
+}
+
+// The queue ID alphabet holds no vowels. A message that starts with a word
+// must therefore keep its own type, and must not lose the word to the queue
+// ID field.
+func TestParse_QueueID_WordPrefixIsNotAQueueID(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want any
+	}{
+		{
+			name: "warning",
+			line: `Mar 29 12:34:56 host postfix/smtpd[9]: warning: hostname does not resolve`,
+			want: pflog.Warning{Text: "hostname does not resolve"},
+		},
+		{
+			name: "reject",
+			line: `Mar 29 12:34:56 host postfix/smtpd[9]: reject: RCPT from unknown[10.0.0.1]: 550 5.1.1 no such user`,
+			want: pflog.Reject{
+				Stage:          "RCPT",
+				ClientHostname: "unknown",
+				ClientIP:       "10.0.0.1",
+				Code:           550,
+				Detail:         "5.1.1 no such user",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := mustParse(t, tc.line)
+			if r.QueueID != "" {
+				t.Errorf("QueueID = %q, want empty", r.QueueID)
+			}
+			if r.Message != tc.want {
+				t.Errorf("Message = %#v, want %#v", r.Message, tc.want)
+			}
+		})
+	}
+}
+
 func TestParse_QueueID_NOQUEUE(t *testing.T) {
 	line := `Mar 29 12:34:56 host postfix/smtpd[1]: NOQUEUE: reject: RCPT from unknown[10.0.0.1]: 550 5.1.1 <x@y.z>: Recipient address rejected`
 	r := mustParse(t, line)
