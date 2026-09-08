@@ -12,17 +12,18 @@
 
 ## Benchmarks
 
-Measured on an AMD EPYC 7763 with `go test -bench=. -benchmem`:
+Measured on an AMD EPYC 7R13 with Go 1.26.1. The numbers are the median of
+10 runs of `go test -bench=. -benchmem`.
 
 | Benchmark | ns/op | B/op | allocs/op |
 |---|---:|---:|---:|
-| `Parse` — Connect | 203 | 128 | 2 |
-| `Parse` — Disconnect (with stats) | 500 | 400 | 4 |
-| `Parse` — Queued | 261 | 128 | 2 |
-| `Parse` — Delivery | 328 | 208 | 2 |
-| `Parse` — Reject | 303 | 176 | 2 |
-| `Parse` — Unknown | 230 | 112 | 2 |
-| `Scanner` — 10 mixed lines | 4,484 | 6,848 | 33 |
+| `Parse` — Connect | 231 | 128 | 2 |
+| `Parse` — Disconnect (with stats) | 562 | 400 | 4 |
+| `Parse` — Queued | 305 | 128 | 2 |
+| `Parse` — Delivery | 435 | 224 | 2 |
+| `Parse` — Reject | 319 | 176 | 2 |
+| `Parse` — Unknown | 246 | 112 | 2 |
+| `Scanner` — 10 mixed lines | 5,208 | 6,864 | 33 |
 
 ## Installation
 

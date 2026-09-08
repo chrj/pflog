@@ -116,6 +116,9 @@ func (Cleanup) isMessage() {}
 type Delivery struct {
 	// To is the recipient envelope address.
 	To string
+	// OrigTo is the recipient address before alias or virtual expansion.
+	// Postfix logs it only when it differs from To, so it is usually empty.
+	OrigTo string
 	// Relay is the relay host used for delivery (e.g., "mail.example.com[1.2.3.4]:25",
 	// "local", or "none").
 	Relay string
@@ -540,99 +543,108 @@ func parseQueued(msg string) (Queued, bool) {
 	return Queued{From: from, Size: size, NRcpt: nrcpt}, true
 }
 
+// parseDelivery parses a delivery attempt line.
+//
+// Postfix writes the fields as a comma-separated "key=value" list and puts
+// optional fields between the fixed ones: orig_to= after to= when an alias
+// expanded, conn_use= after relay= when connection caching is on. The fields
+// are therefore read by name, and unrecognised keys are skipped so that a
+// future Postfix field does not push the whole record to Unknown.
 func parseDelivery(msg string) (Delivery, bool) {
 	const toPrefix = "to=<"
 	if !strings.HasPrefix(msg, toPrefix) {
 		return Delivery{}, false
 	}
-	rest := msg[len(toPrefix):]
 
-	i := strings.IndexByte(rest, '>')
+	var (
+		d                           Delivery
+		haveTo, haveRelay, haveStat bool
+	)
+
+	rest := msg
+	for rest != "" {
+		eq := strings.IndexByte(rest, '=')
+		if eq < 0 {
+			return Delivery{}, false
+		}
+		key, value := rest[:eq], rest[eq+1:]
+
+		// status is always the final field: its detail may contain both
+		// commas and "=", so it cannot go through the field splitter.
+		if key == "status" {
+			status, detail, ok := splitStatusDetail(value)
+			if !ok {
+				return Delivery{}, false
+			}
+			d.Status, d.Detail, haveStat = DeliveryStatus(status), detail, true
+			break
+		}
+
+		value, remainder, ok := splitFieldValue(value)
+		if !ok {
+			return Delivery{}, false
+		}
+		switch key {
+		case "to":
+			d.To, haveTo = value, true
+		case "orig_to":
+			d.OrigTo = value
+		case "relay":
+			d.Relay, haveRelay = value, true
+		case "delay":
+			d.Delay = value
+		case "delays":
+			d.Delays = value
+		case "dsn":
+			d.DSN = value
+		}
+		rest = remainder
+	}
+
+	if !haveTo || !haveRelay || !haveStat {
+		return Delivery{}, false
+	}
+	return d, true
+}
+
+// splitFieldValue reads one field value and returns the text that follows it.
+// A value in angle brackets ends at ">", because an address may contain a
+// comma. Every other value ends at the next comma.
+func splitFieldValue(s string) (value, rest string, ok bool) {
+	if strings.HasPrefix(s, "<") {
+		gt := strings.IndexByte(s, '>')
+		if gt < 0 {
+			return "", "", false
+		}
+		return s[1:gt], trimFieldSeparator(s[gt+1:]), true
+	}
+
+	if i := strings.IndexByte(s, ','); i >= 0 {
+		return strings.TrimSpace(s[:i]), trimFieldSeparator(s[i:]), true
+	}
+	return strings.TrimSpace(s), "", true
+}
+
+// trimFieldSeparator drops the comma and the spaces between two fields.
+func trimFieldSeparator(s string) string {
+	i := 0
+	for i < len(s) && (s[i] == ',' || s[i] == ' ') {
+		i++
+	}
+	return s[i:]
+}
+
+// splitStatusDetail splits "sent (250 2.0.0 OK)" into the status word and the
+// parenthesised detail.
+func splitStatusDetail(s string) (status, detail string, ok bool) {
+	i := strings.Index(s, " (")
 	if i < 0 {
-		return Delivery{}, false
+		return "", "", false
 	}
-	to := rest[:i]
-	rest = rest[i+1:]
-
-	const relayPrefix = ", relay="
-	if !strings.HasPrefix(rest, relayPrefix) {
-		return Delivery{}, false
+	if s[len(s)-1] != ')' {
+		return "", "", false
 	}
-	rest = rest[len(relayPrefix):]
-
-	i = strings.IndexByte(rest, ',')
-	if i < 0 {
-		return Delivery{}, false
-	}
-	relay := strings.TrimSpace(rest[:i])
-	rest = rest[i+1:]
-
-	const delayPrefix = " delay="
-	if !strings.HasPrefix(rest, delayPrefix) {
-		return Delivery{}, false
-	}
-	rest = rest[len(delayPrefix):]
-
-	i = strings.IndexByte(rest, ',')
-	if i < 0 {
-		return Delivery{}, false
-	}
-	delay := strings.TrimSpace(rest[:i])
-	rest = rest[i+1:]
-
-	const delaysPrefix = " delays="
-	if !strings.HasPrefix(rest, delaysPrefix) {
-		return Delivery{}, false
-	}
-	rest = rest[len(delaysPrefix):]
-
-	i = strings.IndexByte(rest, ',')
-	if i < 0 {
-		return Delivery{}, false
-	}
-	delays := strings.TrimSpace(rest[:i])
-	rest = rest[i+1:]
-
-	const dsnPrefix = " dsn="
-	if !strings.HasPrefix(rest, dsnPrefix) {
-		return Delivery{}, false
-	}
-	rest = rest[len(dsnPrefix):]
-
-	i = strings.IndexByte(rest, ',')
-	if i < 0 {
-		return Delivery{}, false
-	}
-	dsn := strings.TrimSpace(rest[:i])
-	rest = rest[i+1:]
-
-	const statusPrefix = " status="
-	if !strings.HasPrefix(rest, statusPrefix) {
-		return Delivery{}, false
-	}
-	rest = rest[len(statusPrefix):]
-
-	i = strings.Index(rest, " (")
-	if i < 0 {
-		return Delivery{}, false
-	}
-	status := rest[:i]
-	rest = rest[i+2:]
-
-	if len(rest) == 0 || rest[len(rest)-1] != ')' {
-		return Delivery{}, false
-	}
-	detail := rest[:len(rest)-1]
-
-	return Delivery{
-		To:     to,
-		Relay:  relay,
-		Delay:  delay,
-		Delays: delays,
-		DSN:    dsn,
-		Status: DeliveryStatus(status),
-		Detail: detail,
-	}, true
+	return s[:i], s[i+2 : len(s)-1], true
 }
 
 func parseReject(msg string) (Reject, bool) {
@@ -754,10 +766,10 @@ func parseStats(s string) map[string]int {
 //	    log.Fatal(err)
 //	}
 type Scanner struct {
-	s        *bufio.Scanner
-	record   *Record
-	err      error
-	onError  func(line string, err error)
+	s       *bufio.Scanner
+	record  *Record
+	err     error
+	onError func(line string, err error)
 }
 
 // NewScanner returns a new Scanner that reads from r.
