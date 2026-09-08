@@ -563,11 +563,16 @@ func parseDelivery(msg string) (Delivery, bool) {
 
 	rest := msg
 	for rest != "" {
+		eq := strings.IndexByte(rest, '=')
+		if eq < 0 {
+			return Delivery{}, false
+		}
+		key, value := rest[:eq], rest[eq+1:]
+
 		// status is always the final field: its detail may contain both
 		// commas and "=", so it cannot go through the field splitter.
-		const statusPrefix = "status="
-		if strings.HasPrefix(rest, statusPrefix) {
-			status, detail, ok := splitStatusDetail(rest[len(statusPrefix):])
+		if key == "status" {
+			status, detail, ok := splitStatusDetail(value)
 			if !ok {
 				return Delivery{}, false
 			}
@@ -575,7 +580,7 @@ func parseDelivery(msg string) (Delivery, bool) {
 			break
 		}
 
-		key, value, remainder, ok := nextDeliveryField(rest)
+		value, remainder, ok := splitFieldValue(value)
 		if !ok {
 			return Delivery{}, false
 		}
@@ -602,33 +607,31 @@ func parseDelivery(msg string) (Delivery, bool) {
 	return d, true
 }
 
-// nextDeliveryField reads one "key=value" field from s and returns the text
-// that follows it. A value in angle brackets ends at ">" because an address
-// may contain a comma; every other value ends at the next comma.
-func nextDeliveryField(s string) (key, value, rest string, ok bool) {
-	eq := strings.IndexByte(s, '=')
-	if eq < 0 {
-		return "", "", "", false
-	}
-	key, s = s[:eq], s[eq+1:]
-
+// splitFieldValue reads one field value and returns the text that follows it.
+// A value in angle brackets ends at ">", because an address may contain a
+// comma. Every other value ends at the next comma.
+func splitFieldValue(s string) (value, rest string, ok bool) {
 	if strings.HasPrefix(s, "<") {
 		gt := strings.IndexByte(s, '>')
 		if gt < 0 {
-			return "", "", "", false
+			return "", "", false
 		}
-		return key, s[1:gt], trimFieldSeparator(s[gt+1:]), true
+		return s[1:gt], trimFieldSeparator(s[gt+1:]), true
 	}
 
 	if i := strings.IndexByte(s, ','); i >= 0 {
-		return key, strings.TrimSpace(s[:i]), trimFieldSeparator(s[i:]), true
+		return strings.TrimSpace(s[:i]), trimFieldSeparator(s[i:]), true
 	}
-	return key, strings.TrimSpace(s), "", true
+	return strings.TrimSpace(s), "", true
 }
 
-// trimFieldSeparator drops the comma and spaces between two fields.
+// trimFieldSeparator drops the comma and the spaces between two fields.
 func trimFieldSeparator(s string) string {
-	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s), ","))
+	i := 0
+	for i < len(s) && (s[i] == ',' || s[i] == ' ') {
+		i++
+	}
+	return s[i:]
 }
 
 // splitStatusDetail splits "sent (250 2.0.0 OK)" into the status word and the
