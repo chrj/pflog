@@ -754,10 +754,10 @@ func parseStats(s string) map[string]int {
 //	    log.Fatal(err)
 //	}
 type Scanner struct {
-	s        *bufio.Scanner
-	record   *Record
-	err      error
-	onError  func(line string, err error)
+	s       *bufio.Scanner
+	record  *Record
+	err     error
+	onError func(line string, err error)
 }
 
 // NewScanner returns a new Scanner that reads from r.
