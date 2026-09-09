@@ -18,17 +18,17 @@ Measured on an AMD EPYC 7R13 with Go 1.26.1. The numbers are the median of
 
 | Benchmark | ns/op | B/op | allocs/op |
 |---|---:|---:|---:|
-| `Parse` — Connect | 232 | 128 | 2 |
-| `Parse` — Disconnect (with stats) | 568 | 400 | 4 |
-| `Parse` — Queued | 289 | 128 | 2 |
-| `Parse` — Delivery | 425 | 224 | 2 |
-| `Parse` — Reject | 324 | 176 | 2 |
-| `Parse` — Unknown | 247 | 112 | 2 |
-| `Scanner` — 10 mixed lines | 5,527 | 6,864 | 33 |
+| `Parse` — Connect | 238 | 128 | 2 |
+| `Parse` — Disconnect (with stats) | 571 | 400 | 4 |
+| `Parse` — Queued | 288 | 128 | 2 |
+| `Parse` — Delivery | 423 | 224 | 2 |
+| `Parse` — Reject | 329 | 176 | 2 |
+| `Parse` — Unknown | 256 | 112 | 2 |
+| `Scanner` — 10 mixed lines | 5,395 | 6,960 | 34 |
 
 The `Scanner` benchmark builds a new scanner for every 10 lines, so it also
-measures the cost to set one up. A scanner that reads 1000 lines takes 443 ns
-for each line.
+measures the cost to set one up. A scanner that reads 1000 lines takes 440 ns
+and 3.1 allocations for each line.
 
 ## Installation
 
