@@ -2,6 +2,8 @@ package pflog_test
 
 import (
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -833,6 +835,356 @@ func TestScanner_ErrorHandler(t *testing.T) {
 		if err == nil {
 			t.Errorf("errs[%d] is nil, want a non-nil error", i)
 		}
+	}
+}
+
+// A line above the limit must not end the scan. The reader has to carry on
+// with the lines that follow it.
+func TestScanner_SkipsOverLongLine(t *testing.T) {
+	long := `Mar 29 12:34:56 host postfix/smtpd[1]: warning: ` + strings.Repeat("x", 70000)
+	input := strings.Join([]string{
+		`Mar 29 12:34:56 host postfix/qmgr[1]: ABCDE12345: removed`,
+		long,
+		`Mar 29 12:34:57 host postfix/smtpd[2]: connect from unknown[1.2.3.4]`,
+	}, "\n")
+
+	s := pflog.NewScanner(strings.NewReader(input))
+
+	var count int
+	for s.Scan() {
+		count++
+	}
+	if err := s.Err(); err != nil {
+		t.Fatalf("Err() = %v, want nil", err)
+	}
+	if count != 2 {
+		t.Errorf("scanned %d records, want 2", count)
+	}
+}
+
+func TestScanner_OverLongLineGoesToErrorHandler(t *testing.T) {
+	long := `Mar 29 12:34:56 host postfix/smtpd[1]: warning: ` + strings.Repeat("x", 70000)
+	input := long + "\n" + `Mar 29 12:34:57 host postfix/qmgr[1]: ABCDE12345: removed`
+
+	s := pflog.NewScanner(strings.NewReader(input))
+
+	var errs []error
+	var lines []string
+	s.SetErrorHandler(func(line string, err error) {
+		lines = append(lines, line)
+		errs = append(errs, err)
+	})
+
+	var count int
+	for s.Scan() {
+		count++
+	}
+	if err := s.Err(); err != nil {
+		t.Fatalf("Err() = %v, want nil", err)
+	}
+	if count != 1 {
+		t.Errorf("scanned %d records, want 1", count)
+	}
+	if len(errs) != 1 {
+		t.Fatalf("error handler called %d times, want 1", len(errs))
+	}
+
+	var tooLong *pflog.LineTooLongError
+	if !errors.As(errs[0], &tooLong) {
+		t.Fatalf("error type = %T, want *pflog.LineTooLongError", errs[0])
+	}
+	if tooLong.Len != len(long) {
+		t.Errorf("Len = %d, want %d", tooLong.Len, len(long))
+	}
+	if tooLong.Limit != pflog.DefaultMaxLineLen {
+		t.Errorf("Limit = %d, want %d", tooLong.Limit, pflog.DefaultMaxLineLen)
+	}
+	// The handler must not receive more than the limit, or the memory bound
+	// has no value.
+	if len(lines[0]) > pflog.DefaultMaxLineLen {
+		t.Errorf("handler line length = %d, want at most %d", len(lines[0]), pflog.DefaultMaxLineLen)
+	}
+}
+
+// The scanner must read past a long line without holding all of it. This
+// test feeds a line of 4 MiB from a reader that makes the bytes as they are
+// asked for, so the test itself never holds the line either. A scanner that
+// buffered the whole line would still pass, but the memory it took would
+// grow with the input.
+func TestScanner_DrainsOverLongLineWithoutHoldingIt(t *testing.T) {
+	const lineLen = 4 << 20
+
+	r := io.MultiReader(
+		&repeatReader{b: 'x', n: lineLen},
+		strings.NewReader("\n"+`Mar 29 12:34:56 host postfix/qmgr[1]: ABCDE12345: removed`),
+	)
+
+	s := pflog.NewScanner(r)
+
+	var got *pflog.LineTooLongError
+	var handlerLineLen int
+	s.SetErrorHandler(func(line string, err error) {
+		handlerLineLen = len(line)
+		errors.As(err, &got)
+	})
+
+	var count int
+	for s.Scan() {
+		count++
+	}
+	if err := s.Err(); err != nil {
+		t.Fatalf("Err() = %v, want nil", err)
+	}
+	if count != 1 {
+		t.Errorf("scanned %d records, want 1", count)
+	}
+	if got == nil {
+		t.Fatal("no LineTooLongError reached the handler")
+	}
+	if got.Len != lineLen {
+		t.Errorf("Len = %d, want %d", got.Len, lineLen)
+	}
+	if handlerLineLen != pflog.DefaultMaxLineLen {
+		t.Errorf("handler line length = %d, want %d", handlerLineLen, pflog.DefaultMaxLineLen)
+	}
+}
+
+// repeatReader gives n copies of one byte and then stops.
+type repeatReader struct {
+	b byte
+	n int
+}
+
+func (r *repeatReader) Read(p []byte) (int, error) {
+	if r.n == 0 {
+		return 0, io.EOF
+	}
+	n := len(p)
+	if n > r.n {
+		n = r.n
+	}
+	for i := 0; i < n; i++ {
+		p[i] = r.b
+	}
+	r.n -= n
+	return n, nil
+}
+
+func TestScanner_SetMaxLineLen(t *testing.T) {
+	line := `Mar 29 12:34:56 host postfix/qmgr[1]: ABCDE12345: removed`
+	s := pflog.NewScanner(strings.NewReader(line))
+	s.SetMaxLineLen(10)
+
+	var errs []error
+	s.SetErrorHandler(func(_ string, err error) { errs = append(errs, err) })
+
+	if s.Scan() {
+		t.Error("Scan() = true, want false: the line is above the limit")
+	}
+	if err := s.Err(); err != nil {
+		t.Fatalf("Err() = %v, want nil", err)
+	}
+	if len(errs) != 1 {
+		t.Fatalf("error handler called %d times, want 1", len(errs))
+	}
+	var tooLong *pflog.LineTooLongError
+	if !errors.As(errs[0], &tooLong) {
+		t.Fatalf("error type = %T, want *pflog.LineTooLongError", errs[0])
+	}
+	if tooLong.Limit != 10 {
+		t.Errorf("Limit = %d, want 10", tooLong.Limit)
+	}
+}
+
+// A long line below the limit must still parse.
+func TestScanner_LongLineBelowLimit(t *testing.T) {
+	detail := strings.Repeat("y", 40000)
+	line := `Mar 29 12:34:56 host postfix/smtpd[1]: warning: ` + detail
+
+	s := pflog.NewScanner(strings.NewReader(line))
+	if !s.Scan() {
+		t.Fatalf("Scan() = false, want true; Err() = %v", s.Err())
+	}
+	w, ok := s.Record().Message.(pflog.Warning)
+	if !ok {
+		t.Fatalf("Message type = %T, want Warning", s.Record().Message)
+	}
+	if w.Text != detail {
+		t.Errorf("Warning.Text length = %d, want %d", len(w.Text), len(detail))
+	}
+}
+
+// The reader must handle a final line that carries no newline, and must strip
+// a carriage return from CRLF input.
+func TestScanner_LineEndings(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  int
+	}{
+		{"no trailing newline", `Mar 29 12:34:56 host postfix/qmgr[1]: ABCDE12345: removed`, 1},
+		{"trailing newline", "Mar 29 12:34:56 host postfix/qmgr[1]: ABCDE12345: removed\n", 1},
+		{"crlf", "Mar 29 12:34:56 host postfix/qmgr[1]: ABCDE12345: removed\r\n", 1},
+		{"two crlf lines", "Mar 29 12:34:56 host postfix/qmgr[1]: ABCDE12345: removed\r\nMar 29 12:34:57 host postfix/qmgr[1]: ABCDE12345: removed\r\n", 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := pflog.NewScanner(strings.NewReader(tc.input))
+			var count int
+			for s.Scan() {
+				if _, ok := s.Record().Message.(pflog.Removed); !ok {
+					t.Errorf("Message type = %T, want Removed", s.Record().Message)
+				}
+				count++
+			}
+			if err := s.Err(); err != nil {
+				t.Fatalf("Err() = %v, want nil", err)
+			}
+			if count != tc.want {
+				t.Errorf("scanned %d records, want %d", count, tc.want)
+			}
+		})
+	}
+}
+
+// A read error must reach Err, and must not look like the end of the input.
+func TestScanner_ReadError(t *testing.T) {
+	want := errors.New("boom")
+	r := io.MultiReader(
+		strings.NewReader("Mar 29 12:34:56 host postfix/qmgr[1]: ABCDE12345: removed\n"),
+		&errReader{err: want},
+	)
+
+	s := pflog.NewScanner(r)
+	var count int
+	for s.Scan() {
+		count++
+	}
+	if count != 1 {
+		t.Errorf("scanned %d records, want 1", count)
+	}
+	if !errors.Is(s.Err(), want) {
+		t.Errorf("Err() = %v, want %v", s.Err(), want)
+	}
+}
+
+type errReader struct{ err error }
+
+func (r *errReader) Read([]byte) (int, error) { return 0, r.err }
+
+// io.Reader allows a reader to give data and an error in the same call. The
+// data must still reach the caller, and the error must arrive after it.
+func TestScanner_ReadErrorWithFinalLine(t *testing.T) {
+	want := errors.New("boom")
+	cases := []struct {
+		name string
+		data string
+	}{
+		{"no trailing newline", `Mar 29 12:34:56 host postfix/qmgr[1]: ABCDE12345: removed`},
+		{"trailing newline", "Mar 29 12:34:56 host postfix/qmgr[1]: ABCDE12345: removed\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := pflog.NewScanner(&dataThenErrReader{data: tc.data, err: want})
+
+			var count int
+			for s.Scan() {
+				if _, ok := s.Record().Message.(pflog.Removed); !ok {
+					t.Errorf("Message type = %T, want Removed", s.Record().Message)
+				}
+				count++
+			}
+			if count != 1 {
+				t.Errorf("scanned %d records, want 1", count)
+			}
+			if !errors.Is(s.Err(), want) {
+				t.Errorf("Err() = %v, want %v", s.Err(), want)
+			}
+		})
+	}
+}
+
+// dataThenErrReader gives data and an error in the same Read call.
+type dataThenErrReader struct {
+	data string
+	err  error
+	done bool
+}
+
+func (r *dataThenErrReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, r.err
+	}
+	r.done = true
+	return copy(p, r.data), r.err
+}
+
+// The end-of-line bytes are not part of the line. A line of exactly the limit
+// followed by CRLF is therefore within the limit, not above it.
+func TestScanner_LineExactlyAtLimitWithCRLF(t *testing.T) {
+	const prefix = `Mar 29 12:34:56 host postfix/smtpd[1]: warning: `
+	body := strings.Repeat("z", pflog.DefaultMaxLineLen-len(prefix))
+
+	s := pflog.NewScanner(strings.NewReader(prefix + body + "\r\n"))
+	var skipped error
+	s.SetErrorHandler(func(_ string, err error) { skipped = err })
+
+	if !s.Scan() {
+		t.Fatalf("Scan() = false, want true; skipped = %v, Err() = %v", skipped, s.Err())
+	}
+	w, ok := s.Record().Message.(pflog.Warning)
+	if !ok {
+		t.Fatalf("Message type = %T, want Warning", s.Record().Message)
+	}
+	if w.Text != body {
+		t.Errorf("Warning.Text length = %d, want %d", len(w.Text), len(body))
+	}
+	if skipped != nil {
+		t.Errorf("error handler got %v, want no call", skipped)
+	}
+}
+
+// A CRLF pair can fall across two reads of the buffer inside the reader. The
+// carriage return must still leave the line, whatever the length.
+func TestScanner_CRLFAcrossReads(t *testing.T) {
+	const prefix = `Mar 29 12:34:56 host postfix/smtpd[1]: warning: `
+	// The reader buffer holds 4096 bytes, so these lengths put the carriage
+	// return on both sides of a read boundary.
+	for _, total := range []int{4094, 4095, 4096, 4097, 8192} {
+		t.Run(fmt.Sprintf("%d", total), func(t *testing.T) {
+			body := strings.Repeat("z", total-len(prefix))
+
+			s := pflog.NewScanner(strings.NewReader(prefix + body + "\r\n"))
+			if !s.Scan() {
+				t.Fatalf("Scan() = false, want true; Err() = %v", s.Err())
+			}
+			w, ok := s.Record().Message.(pflog.Warning)
+			if !ok {
+				t.Fatalf("Message type = %T, want Warning", s.Record().Message)
+			}
+			if w.Text != body {
+				t.Errorf("Warning.Text length = %d, want %d", len(w.Text), len(body))
+			}
+		})
+	}
+}
+
+// A CRLF line above the limit must report the length of the line itself,
+// without the end-of-line bytes.
+func TestScanner_OverLongCRLFLineReportsLength(t *testing.T) {
+	line := `Mar 29 12:34:56 host postfix/smtpd[1]: warning: ` + strings.Repeat("z", 70000)
+
+	s := pflog.NewScanner(strings.NewReader(line + "\r\n"))
+	var got *pflog.LineTooLongError
+	s.SetErrorHandler(func(_ string, err error) { errors.As(err, &got) })
+
+	for s.Scan() {
+	}
+	if got == nil {
+		t.Fatal("no LineTooLongError reached the handler")
+	}
+	if got.Len != len(line) {
+		t.Errorf("Len = %d, want %d", got.Len, len(line))
 	}
 }
 

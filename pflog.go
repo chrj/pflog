@@ -15,6 +15,7 @@ package pflog
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -782,12 +783,32 @@ func parseStats(s string) map[string]int {
 	return stats
 }
 
+// DefaultMaxLineLen is the longest line that a [Scanner] reads by default.
+// A longer line is skipped. Use [Scanner.SetMaxLineLen] to change the limit.
+const DefaultMaxLineLen = 64 * 1024
+
+// LineTooLongError goes to the [Scanner.SetErrorHandler] callback when a line
+// is longer than the scanner limit. The scanner skips such a line and reads
+// on from the next one.
+type LineTooLongError struct {
+	// Len is the length of the skipped line in bytes.
+	Len int
+	// Limit is the scanner limit in bytes.
+	Limit int
+}
+
+func (e *LineTooLongError) Error() string {
+	return fmt.Sprintf("pflog: line of %d bytes is longer than the limit of %d bytes", e.Len, e.Limit)
+}
+
 // Scanner reads Postfix log [Record]s from an [io.Reader] one line at a time.
 // Lines that do not match the expected syslog format are silently skipped,
-// making it safe to use on mixed syslog files.
+// making it safe to use on mixed syslog files. A line longer than the limit
+// of [Scanner.SetMaxLineLen] is skipped in the same way, so one long line
+// does not stop the scan.
 //
-// To be notified when a line is skipped due to a parse error, register a
-// callback with [Scanner.SetErrorHandler] before calling [Scanner.Scan].
+// To be notified when a line is skipped, register a callback with
+// [Scanner.SetErrorHandler] before calling [Scanner.Scan].
 //
 // Usage:
 //
@@ -800,47 +821,170 @@ func parseStats(s string) map[string]int {
 //	    log.Fatal(err)
 //	}
 type Scanner struct {
-	s       *bufio.Scanner
-	record  *Record
-	err     error
-	onError func(line string, err error)
+	r          *bufio.Reader
+	maxLineLen int
+	record     *Record
+	err        error
+	pending    error // read error held back until its data is delivered
+	onError    func(line string, err error)
 }
 
 // NewScanner returns a new Scanner that reads from r.
 func NewScanner(r io.Reader) *Scanner {
-	return &Scanner{s: bufio.NewScanner(r)}
+	return &Scanner{r: bufio.NewReader(r), maxLineLen: DefaultMaxLineLen}
 }
 
 // SetErrorHandler registers fn to be called whenever a line is skipped
-// because it cannot be parsed as a Postfix log entry. fn receives the raw
-// line and the parse error. Passing nil clears a previously set handler.
+// because it cannot be parsed as a Postfix log entry, or because it is longer
+// than the limit. fn receives the raw line and the error. A line above the
+// limit reaches fn cut to the limit, so that the callback cannot receive more
+// than the scanner holds. Passing nil clears a previously set handler.
 // SetErrorHandler must be called before the first call to [Scanner.Scan].
 func (s *Scanner) SetErrorHandler(fn func(line string, err error)) {
 	s.onError = fn
 }
 
+// SetMaxLineLen sets the longest line that the Scanner reads. A longer line
+// goes to the error handler as a [LineTooLongError], and the Scanner reads on
+// from the next line. The limit bounds the memory that one line can take.
+// A value below 1 selects [DefaultMaxLineLen]. SetMaxLineLen must be called
+// before the first call to [Scanner.Scan].
+func (s *Scanner) SetMaxLineLen(n int) {
+	if n < 1 {
+		n = DefaultMaxLineLen
+	}
+	s.maxLineLen = n
+}
+
 // Scan advances the scanner to the next record and returns true if one is
-// available. It returns false at the end of input or on a read error. Lines
-// that cannot be parsed as Postfix entries are silently skipped; register an
-// error handler with [Scanner.SetErrorHandler] to observe those errors.
+// available. It returns false at the end of input or on a read error. A line
+// that cannot be parsed, and a line above the limit, are silently skipped;
+// register an error handler with [Scanner.SetErrorHandler] to observe those.
 func (s *Scanner) Scan() bool {
-	for s.s.Scan() {
-		line := s.s.Text()
+	for {
+		line, n, err := s.readLine()
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				s.err = err
+			}
+			return false
+		}
+		if n > s.maxLineLen {
+			s.report(line, &LineTooLongError{Len: n, Limit: s.maxLineLen})
+			continue
+		}
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
 		r, err := Parse(line)
 		if err != nil {
-			if s.onError != nil {
-				s.onError(line, err)
-			}
+			s.report(line, err)
 			continue
 		}
 		s.record = r
 		return true
 	}
-	s.err = s.s.Err()
-	return false
+}
+
+func (s *Scanner) report(line string, err error) {
+	if s.onError != nil {
+		s.onError(line, err)
+	}
+}
+
+// readLine reads the next line and removes the end-of-line bytes. It returns
+// the line and the full length of it.
+//
+// A line longer than the limit is cut, but its full length is still returned,
+// and the rest of it is read and dropped. The caller thus learns the true
+// length while the memory for one line stays bounded.
+func (s *Scanner) readLine() (string, int, error) {
+	if err := s.pending; err != nil {
+		s.pending = nil
+		return "", 0, err
+	}
+
+	var (
+		buf  []byte // filled only when a line spans more than one read
+		raw  int    // bytes of the line so far, end-of-line bytes counted
+		prev byte   // last byte of the read before this one
+	)
+	for {
+		chunk, err := s.r.ReadSlice('\n')
+
+		if errors.Is(err, bufio.ErrBufferFull) {
+			raw += len(chunk)
+			buf = appendUpTo(buf, chunk, s.maxLineLen)
+			if len(chunk) > 0 {
+				prev = chunk[len(chunk)-1]
+			}
+			continue
+		}
+
+		// Any other error ends the line. A reader is allowed to give data and
+		// an error together, so hold the error back until the data is out.
+		if err != nil && !errors.Is(err, io.EOF) {
+			s.pending = err
+		}
+
+		if len(chunk) == 0 && buf == nil {
+			if err := s.pending; err != nil {
+				s.pending = nil
+				return "", 0, err
+			}
+			return "", 0, io.EOF
+		}
+
+		raw += len(chunk)
+		n := raw - eolLen(chunk, prev)
+
+		// A line that arrives in one read needs no copy.
+		if buf == nil {
+			if n > s.maxLineLen {
+				return string(chunk[:s.maxLineLen]), n, nil
+			}
+			return string(chunk[:n]), n, nil
+		}
+
+		buf = appendUpTo(buf, chunk, s.maxLineLen)
+		// The cut already dropped the end-of-line bytes of a line above the
+		// limit. A shorter line still carries them.
+		if len(buf) > n {
+			buf = buf[:n]
+		}
+		return string(buf), n, nil
+	}
+}
+
+// eolLen returns the count of end-of-line bytes at the end of the last read
+// of a line. prev is the last byte of the read before it, which matters when
+// a CRLF pair falls across two reads.
+func eolLen(chunk []byte, prev byte) int {
+	if len(chunk) == 0 || chunk[len(chunk)-1] != '\n' {
+		return 0
+	}
+	if len(chunk) >= 2 {
+		if chunk[len(chunk)-2] == '\r' {
+			return 2
+		}
+		return 1
+	}
+	if prev == '\r' {
+		return 2
+	}
+	return 1
+}
+
+// appendUpTo appends src to dst, but stops when dst holds max bytes.
+func appendUpTo(dst, src []byte, max int) []byte {
+	room := max - len(dst)
+	if room <= 0 {
+		return dst
+	}
+	if len(src) > room {
+		src = src[:room]
+	}
+	return append(dst, src...)
 }
 
 // Record returns the most recent record parsed by [Scanner.Scan].
