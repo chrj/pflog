@@ -109,6 +109,88 @@ func TestParse_InvalidTimestamp(t *testing.T) {
 	}
 }
 
+// time.Date normalises a value that is out of range, so an impossible
+// timestamp would otherwise become a real time that is quietly wrong.
+func TestParse_TimestampOutOfRange(t *testing.T) {
+	cases := []struct {
+		name string
+		ts   string
+	}{
+		{"day 0", "Jan  0 00:00:00"},
+		{"day 32", "Jan 32 00:00:00"},
+		{"day 99", "Jan 99 00:00:00"},
+		{"31 February", "Feb 31 00:00:00"},
+		{"30 February", "Feb 30 00:00:00"},
+		{"31 April", "Apr 31 00:00:00"},
+		{"31 June", "Jun 31 00:00:00"},
+		{"31 September", "Sep 31 00:00:00"},
+		{"31 November", "Nov 31 00:00:00"},
+		{"hour 24", "Jan  1 24:00:00"},
+		{"hour 25", "Jan  1 25:00:00"},
+		{"minute 60", "Jan  1 00:60:00"},
+		{"second 60", "Jan  1 00:00:60"},
+		{"all above range", "Jan  1 25:61:61"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := tc.ts + ` host postfix/qmgr[1]: ABCDE12345: removed`
+
+			r, err := pflog.Parse(line)
+			if err == nil {
+				t.Fatalf("Parse(%q) error = nil, want an error; Time = %s",
+					line, r.Time.Format(time.RFC3339))
+			}
+			var tsErr *pflog.TimestampError
+			if !errors.As(err, &tsErr) {
+				t.Fatalf("error type = %T, want *pflog.TimestampError", err)
+			}
+			if tsErr.Timestamp != tc.ts {
+				t.Errorf("TimestampError.Timestamp = %q, want %q", tsErr.Timestamp, tc.ts)
+			}
+		})
+	}
+}
+
+// The edge of each range must still parse. February gets 29 days, because the
+// line does not carry a year and so a leap year cannot be ruled out.
+func TestParse_TimestampRangeEdges(t *testing.T) {
+	cases := []struct {
+		name              string
+		ts                string
+		month             time.Month
+		day, hr, min, sec int
+	}{
+		{"first second of January", "Jan  1 00:00:00", time.January, 1, 0, 0, 0},
+		{"last day of January", "Jan 31 23:59:59", time.January, 31, 23, 59, 59},
+		{"28 February", "Feb 28 12:00:00", time.February, 28, 12, 0, 0},
+		{"30 April", "Apr 30 12:00:00", time.April, 30, 12, 0, 0},
+		{"last day of December", "Dec 31 23:59:59", time.December, 31, 23, 59, 59},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := tc.ts + ` host postfix/qmgr[1]: ABCDE12345: removed`
+			r := mustParse(t, line)
+			assertTime(t, r.Time, tc.month, tc.day, tc.hr, tc.min, tc.sec)
+		})
+	}
+}
+
+// A line dated 29 February is legal: the line carries no year, so a leap year
+// cannot be ruled out. Parse must accept it. The date it gives moves to
+// 1 March when the year that Parse assumes is not a leap year, which is the
+// known limit of the year that [Record.Time] documents.
+func TestParse_TwentyNinthOfFebruaryIsAccepted(t *testing.T) {
+	line := `Feb 29 12:00:00 host postfix/qmgr[1]: ABCDE12345: removed`
+
+	r, err := pflog.Parse(line)
+	if err != nil {
+		t.Fatalf("Parse(%q) error = %v, want nil", line, err)
+	}
+	if _, ok := r.Message.(pflog.Removed); !ok {
+		t.Errorf("Message type = %T, want Removed", r.Message)
+	}
+}
+
 func TestParse_InvalidPID(t *testing.T) {
 	line := "Jan  1 00:00:00 host postfix/smtpd[abc]: connect from host[1.2.3.4]"
 	_, err := pflog.Parse(line)
