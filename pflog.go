@@ -268,12 +268,15 @@ func Parse(line string) (*Record, error) {
 	rest := line[tsLen+1:]
 
 	// hostname is the next space-delimited token.
-	if rest == "" {
-		return nil, &FormatError{Line: line, Reason: "missing hostname"}
-	}
 	spaceIdx := strings.IndexByte(rest, ' ')
 	if spaceIdx < 0 {
-		return nil, &FormatError{Line: line, Reason: "missing process field"}
+		// Nothing follows the timestamp at all, or a hostname stands alone
+		// with no process field after it.
+		reason := "missing process field"
+		if rest == "" {
+			reason = "missing hostname"
+		}
+		return nil, &FormatError{Line: line, Reason: reason}
 	}
 	hostname := rest[:spaceIdx]
 	rest = rest[spaceIdx+1:]
