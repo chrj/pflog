@@ -481,6 +481,82 @@ func TestParse_Queued(t *testing.T) {
 
 // ---- Removed (qmgr) ---------------------------------------------------------
 
+// The nrcpt value can end the line. Postfix normally writes " (queue active)"
+// after it, but the parser must not need that text to be there.
+func TestParse_QueuedWithoutTrailingText(t *testing.T) {
+	cases := []struct {
+		name  string
+		msg   string
+		from  string
+		size  int
+		nrcpt int
+	}{
+		{
+			name: "nrcpt ends the line",
+			msg:  `from=<sender@example.com>, size=12345, nrcpt=1`,
+			from: "sender@example.com", size: 12345, nrcpt: 1,
+		},
+		{
+			name: "nrcpt of more than one digit ends the line",
+			msg:  `from=<sender@example.com>, size=12345, nrcpt=42`,
+			from: "sender@example.com", size: 12345, nrcpt: 42,
+		},
+		{
+			name: "empty sender and nrcpt ends the line",
+			msg:  `from=<>, size=500, nrcpt=2`,
+			from: "", size: 500, nrcpt: 2,
+		},
+		{
+			name: "trailing text is still accepted",
+			msg:  `from=<sender@example.com>, size=12345, nrcpt=1 (queue active)`,
+			from: "sender@example.com", size: 12345, nrcpt: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := `Mar 29 12:34:56 host postfix/qmgr[1]: ABCDE12345: ` + tc.msg
+			r := mustParse(t, line)
+
+			q, ok := r.Message.(pflog.Queued)
+			if !ok {
+				t.Fatalf("Message type = %T, want Queued", r.Message)
+			}
+			if q.From != tc.from {
+				t.Errorf("Queued.From = %q, want %q", q.From, tc.from)
+			}
+			if q.Size != tc.size {
+				t.Errorf("Queued.Size = %d, want %d", q.Size, tc.size)
+			}
+			if q.NRcpt != tc.nrcpt {
+				t.Errorf("Queued.NRcpt = %d, want %d", q.NRcpt, tc.nrcpt)
+			}
+		})
+	}
+}
+
+// A broken nrcpt value must still fall back to Unknown.
+func TestParse_QueuedBadNRcpt(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+	}{
+		{"no value", `from=<s@example.com>, size=100, nrcpt=`},
+		{"not a number", `from=<s@example.com>, size=100, nrcpt=x`},
+		{"not a number, with trailing text", `from=<s@example.com>, size=100, nrcpt=x (queue active)`},
+		{"no nrcpt field", `from=<s@example.com>, size=100`},
+		{"no size field", `from=<s@example.com>, nrcpt=1`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := `Mar 29 12:34:56 host postfix/qmgr[1]: ABCDE12345: ` + tc.msg
+			r := mustParse(t, line)
+			if _, ok := r.Message.(pflog.Unknown); !ok {
+				t.Errorf("Message type = %T, want Unknown", r.Message)
+			}
+		})
+	}
+}
+
 func TestParse_Removed(t *testing.T) {
 	line := `Mar 29 12:34:56 host postfix/qmgr[1]: ABCDE12345: removed`
 	r := mustParse(t, line)

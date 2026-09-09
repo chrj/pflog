@@ -591,11 +591,12 @@ func parseQueued(msg string) (Queued, bool) {
 	}
 	rest = rest[len(nrcptPrefix):]
 
-	spaceIdx := strings.IndexByte(rest, ' ')
-	if spaceIdx < 0 {
-		return Queued{}, false
+	// Postfix writes " (queue active)" after the count, but the count can
+	// also end the line.
+	if i := strings.IndexByte(rest, ' '); i >= 0 {
+		rest = rest[:i]
 	}
-	nrcpt, err := strconv.Atoi(rest[:spaceIdx])
+	nrcpt, err := strconv.Atoi(rest)
 	if err != nil {
 		return Queued{}, false
 	}
