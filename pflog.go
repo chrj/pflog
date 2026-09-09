@@ -185,6 +185,13 @@ var monthNames = [12]string{
 	"Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 }
 
+// maxDayInMonth maps a [time.Month] to the highest day number it can hold.
+// February gets 29: a syslog line carries no year, so a leap year cannot be
+// ruled out and 29 February has to be accepted.
+var maxDayInMonth = [13]int{
+	0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+}
+
 // FormatError is returned by [Parse] when the input line does not conform to
 // the expected BSD syslog format.
 type FormatError struct {
@@ -308,6 +315,11 @@ func Parse(line string) (*Record, error) {
 
 // parseTimestamp parses a 15-character BSD syslog timestamp ("Jan  1 00:00:00")
 // and returns a time.Time in UTC with the current year applied.
+//
+// Every field is checked against its range before the date is built.
+// time.Date carries a value that is out of range over into the next unit, so
+// without these checks a corrupt line would give a real time that is quietly
+// wrong: "Jan 32" would become 1 February.
 func parseTimestamp(s string) (time.Time, error) {
 	if len(s) != 15 {
 		return time.Time{}, fmt.Errorf("wrong length")
@@ -334,6 +346,9 @@ func parseTimestamp(s string) (time.Time, error) {
 	if !ok {
 		return time.Time{}, fmt.Errorf("invalid day")
 	}
+	if day < 1 || day > maxDayInMonth[month] {
+		return time.Time{}, fmt.Errorf("day %d is out of range for %s", day, month)
+	}
 
 	if s[6] != ' ' {
 		return time.Time{}, fmt.Errorf("expected space after day")
@@ -342,6 +357,9 @@ func parseTimestamp(s string) (time.Time, error) {
 	hour, ok := parseTwoDigitInt(s[7], s[8])
 	if !ok {
 		return time.Time{}, fmt.Errorf("invalid hour")
+	}
+	if hour > 23 {
+		return time.Time{}, fmt.Errorf("hour %d is out of range", hour)
 	}
 
 	if s[9] != ':' {
@@ -352,6 +370,9 @@ func parseTimestamp(s string) (time.Time, error) {
 	if !ok {
 		return time.Time{}, fmt.Errorf("invalid minute")
 	}
+	if min > 59 {
+		return time.Time{}, fmt.Errorf("minute %d is out of range", min)
+	}
 
 	if s[12] != ':' {
 		return time.Time{}, fmt.Errorf("expected ':' after minute")
@@ -360,6 +381,9 @@ func parseTimestamp(s string) (time.Time, error) {
 	sec, ok := parseTwoDigitInt(s[13], s[14])
 	if !ok {
 		return time.Time{}, fmt.Errorf("invalid second")
+	}
+	if sec > 59 {
+		return time.Time{}, fmt.Errorf("second %d is out of range", sec)
 	}
 
 	now := time.Now().UTC()
