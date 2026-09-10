@@ -10,6 +10,7 @@
 - `ParseAt` takes a reference time for the year, which the BSD syslog format omits. Use it for a log from another period, for a log that crosses a year boundary, and to keep the clock read out of a loop over many lines.
 - Each entry is returned as a `Record` containing the timestamp, hostname, Postfix daemon name, process ID, queue ID, and a typed `Message`.
 - Recognised message types: `Connect`, `Disconnect`, `Queued`, `Removed`, `Cleanup`, `Delivery`, `Reject`, `BounceNotification`, `Warning`, and `Unknown`.
+- `Connect`, `Disconnect` and `Reject` carry the client port when Postfix logs it, which needs `smtpd_client_port_logging = yes`. The field is zero when it is off.
 - `Scanner` skips a line that it cannot parse, and a line above `SetMaxLineLen`, so one bad line does not stop the scan. Use `SetErrorHandler` to see the skipped lines.
 
 ## Benchmarks
