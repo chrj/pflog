@@ -514,21 +514,37 @@ func parseMessage(msg string) Message {
 	return Unknown{Text: msg}
 }
 
+// splitClientAddress splits "hostname[address]" from the front of s and
+// returns the text that follows the closing bracket. Postfix writes a client
+// this way in connect, disconnect and reject lines.
+//
+// The search runs from the left. A hostname from DNS cannot hold a bracket,
+// and a search from the left stops inside the client field, away from a
+// bracket in the text that follows it, such as a rejection reason.
+func splitClientAddress(s string) (hostname, address, rest string, ok bool) {
+	open := strings.IndexByte(s, '[')
+	if open < 0 {
+		return "", "", "", false
+	}
+	end := strings.IndexByte(s[open+1:], ']')
+	if end < 0 {
+		return "", "", "", false
+	}
+	end += open + 1
+	return s[:open], s[open+1 : end], s[end+1:], true
+}
+
 func parseConnect(msg string) (Connect, bool) {
 	const prefix = "connect from "
 	if !strings.HasPrefix(msg, prefix) {
 		return Connect{}, false
 	}
-	rest := msg[len(prefix):]
-	// hostname ends just before the last "["; IP is between "[" and trailing "]".
-	bracketOpen := strings.LastIndexByte(rest, '[')
-	if bracketOpen < 0 || rest[len(rest)-1] != ']' {
+	hostname, address, rest, ok := splitClientAddress(msg[len(prefix):])
+	// A connect line ends at the client, so nothing may follow it.
+	if !ok || rest != "" {
 		return Connect{}, false
 	}
-	return Connect{
-		Hostname: rest[:bracketOpen],
-		IP:       rest[bracketOpen+1 : len(rest)-1],
-	}, true
+	return Connect{Hostname: hostname, IP: address}, true
 }
 
 func parseDisconnect(msg string) (Disconnect, bool) {
@@ -536,24 +552,14 @@ func parseDisconnect(msg string) (Disconnect, bool) {
 	if !strings.HasPrefix(msg, prefix) {
 		return Disconnect{}, false
 	}
-	rest := msg[len(prefix):]
-	bracketOpen := strings.IndexByte(rest, '[')
-	if bracketOpen < 0 {
+	hostname, address, rest, ok := splitClientAddress(msg[len(prefix):])
+	if !ok {
 		return Disconnect{}, false
-	}
-	closeOff := strings.IndexByte(rest[bracketOpen:], ']')
-	if closeOff < 0 {
-		return Disconnect{}, false
-	}
-	bracketClose := bracketOpen + closeOff
-	var statsStr string
-	if bracketClose+1 < len(rest) {
-		statsStr = strings.TrimSpace(rest[bracketClose+1:])
 	}
 	return Disconnect{
-		Hostname: rest[:bracketOpen],
-		IP:       rest[bracketOpen+1 : bracketClose],
-		Stats:    parseStats(statsStr),
+		Hostname: hostname,
+		IP:       address,
+		Stats:    parseStats(strings.TrimSpace(rest)),
 	}, true
 }
 
@@ -739,19 +745,10 @@ func parseReject(msg string) (Reject, bool) {
 	rest = rest[len(fromPrefix):]
 
 	// "hostname[ip]: code detail"
-	bracketOpen := strings.IndexByte(rest, '[')
-	if bracketOpen < 0 {
+	clientHostname, clientIP, rest, ok := splitClientAddress(rest)
+	if !ok {
 		return Reject{}, false
 	}
-	clientHostname := rest[:bracketOpen]
-	rest = rest[bracketOpen+1:]
-
-	bracketClose := strings.IndexByte(rest, ']')
-	if bracketClose < 0 {
-		return Reject{}, false
-	}
-	clientIP := rest[:bracketClose]
-	rest = rest[bracketClose+1:]
 
 	const colonPrefix = ": "
 	if !strings.HasPrefix(rest, colonPrefix) {
