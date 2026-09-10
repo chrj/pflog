@@ -1,0 +1,10 @@
+version: "2"
+
+# gofmt and goimports run as part of "golangci-lint run", so the command in
+# CI and the command a developer runs report the same faults. Without this,
+# a file that gofmt would change passes the lint job: golangci-lint does not
+# enable either formatter by default.
+formatters:
+  enable:
+    - gofmt
+    - goimports
