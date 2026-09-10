@@ -407,6 +407,131 @@ func TestParse_Connect(t *testing.T) {
 
 // ---- Disconnect -------------------------------------------------------------
 
+// connect and disconnect carry the same "hostname[address]" field, so they
+// must read it the same way.
+func TestParse_ClientAddressReadTheSameWay(t *testing.T) {
+	cases := []struct {
+		name     string
+		client   string
+		hostname string
+		ip       string
+	}{
+		{"named host", "mail.example.com[203.0.113.10]", "mail.example.com", "203.0.113.10"},
+		{"unknown host", "unknown[10.0.0.1]", "unknown", "10.0.0.1"},
+		{"IPv6", "unknown[2001:db8::1]", "unknown", "2001:db8::1"},
+		{"unknown address", "unknown[unknown]", "unknown", "unknown"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const stamp = `Mar 29 12:34:56 host postfix/smtpd[1]: `
+
+			cr := mustParse(t, stamp+"connect from "+tc.client)
+			c, ok := cr.Message.(pflog.Connect)
+			if !ok {
+				t.Fatalf("connect Message type = %T, want Connect", cr.Message)
+			}
+
+			dr := mustParse(t, stamp+"disconnect from "+tc.client+" ehlo=1 quit=1 commands=2")
+			d, ok := dr.Message.(pflog.Disconnect)
+			if !ok {
+				t.Fatalf("disconnect Message type = %T, want Disconnect", dr.Message)
+			}
+
+			if c.Hostname != tc.hostname {
+				t.Errorf("Connect.Hostname = %q, want %q", c.Hostname, tc.hostname)
+			}
+			if c.IP != tc.ip {
+				t.Errorf("Connect.IP = %q, want %q", c.IP, tc.ip)
+			}
+			if d.Hostname != tc.hostname {
+				t.Errorf("Disconnect.Hostname = %q, want %q", d.Hostname, tc.hostname)
+			}
+			if d.IP != tc.ip {
+				t.Errorf("Disconnect.IP = %q, want %q", d.IP, tc.ip)
+			}
+		})
+	}
+}
+
+// A hostname from DNS cannot hold a bracket, so this line cannot occur. It is
+// kept because the two parsers used to give different answers for it: connect
+// searched from the right and gave "a[b].example.com" with the address
+// "1.2.3.4", while disconnect searched from the left and gave "a" with the
+// address "b". Both now search from the left, so connect no longer finds a
+// client that reaches the end of the line, and refuses the line instead of
+// giving an answer that disagrees with disconnect.
+func TestParse_BracketInsideHostname(t *testing.T) {
+	const stamp = `Mar 29 12:34:56 host postfix/smtpd[1]: `
+	const client = "a[b].example.com[1.2.3.4]"
+
+	cr := mustParse(t, stamp+"connect from "+client)
+	if _, ok := cr.Message.(pflog.Unknown); !ok {
+		t.Errorf("connect Message type = %T, want Unknown", cr.Message)
+	}
+
+	dr := mustParse(t, stamp+"disconnect from "+client+" commands=1")
+	d, ok := dr.Message.(pflog.Disconnect)
+	if !ok {
+		t.Fatalf("disconnect Message type = %T, want Disconnect", dr.Message)
+	}
+	if d.Hostname != "a" || d.IP != "b" {
+		t.Errorf("Disconnect hostname/IP = %q/%q, want %q/%q", d.Hostname, d.IP, "a", "b")
+	}
+}
+
+// A connect line ends at the client. Text after the closing bracket means the
+// line is not the shape that Postfix writes.
+func TestParse_ConnectWithTrailingText(t *testing.T) {
+	line := `Mar 29 12:34:56 host postfix/smtpd[1]: connect from unknown[1.2.3.4] extra`
+	r := mustParse(t, line)
+	if _, ok := r.Message.(pflog.Unknown); !ok {
+		t.Errorf("Message type = %T, want Unknown", r.Message)
+	}
+}
+
+// A rejection reason can hold a bracket. Reading the client field from the
+// left keeps the search away from it.
+func TestParse_RejectDetailWithBracket(t *testing.T) {
+	line := `Mar 29 12:34:56 host postfix/smtpd[1]: NOQUEUE: reject: RCPT from unknown[10.0.0.1]: 550 5.1.1 blocked [see http://example.com/why]`
+	r := mustParse(t, line)
+
+	rj, ok := r.Message.(pflog.Reject)
+	if !ok {
+		t.Fatalf("Message type = %T, want Reject", r.Message)
+	}
+	if rj.ClientHostname != "unknown" {
+		t.Errorf("ClientHostname = %q, want %q", rj.ClientHostname, "unknown")
+	}
+	if rj.ClientIP != "10.0.0.1" {
+		t.Errorf("ClientIP = %q, want %q", rj.ClientIP, "10.0.0.1")
+	}
+	want := "5.1.1 blocked [see http://example.com/why]"
+	if rj.Detail != want {
+		t.Errorf("Detail = %q, want %q", rj.Detail, want)
+	}
+}
+
+// A client field with no closing bracket must fall back to Unknown.
+func TestParse_ClientAddressUnclosed(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+	}{
+		{"connect, no brackets", `connect from localhost`},
+		{"connect, no closing bracket", `connect from unknown[1.2.3.4`},
+		{"disconnect, no brackets", `disconnect from localhost`},
+		{"disconnect, no closing bracket", `disconnect from unknown[1.2.3.4 ehlo=1`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := mustParse(t, `Mar 29 12:34:56 host postfix/smtpd[1]: `+tc.msg)
+			if _, ok := r.Message.(pflog.Unknown); !ok {
+				t.Errorf("Message type = %T, want Unknown", r.Message)
+			}
+		})
+	}
+}
+
 func TestParse_Disconnect_WithStats(t *testing.T) {
 	line := `Mar 29 12:34:56 host postfix/smtpd[1]: disconnect from unknown[10.0.0.1] ehlo=1 mail=1 rcpt=1 data=1 quit=1 commands=5`
 	r := mustParse(t, line)
