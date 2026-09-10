@@ -261,11 +261,20 @@ func Parse(line string) (*Record, error) {
 // ParseAt parses a single Postfix log line and returns a [Record], taking the
 // year from ref.
 //
-// The BSD syslog format omits the year. ParseAt uses the year of ref, or the
-// year before it when that would put the entry more than [MaxClockSkew] after
-// ref. A log that crosses a year boundary therefore keeps its order: a line
-// dated 31 December, read with a reference time in January, gets the year
-// before.
+// The BSD syslog format omits the year. ParseAt takes the most recent year
+// that leaves the entry no more than [MaxClockSkew] after ref. That is
+// usually the year of ref, but either neighbour can win:
+//
+//   - The year before, when the entry would otherwise fall too far ahead.
+//     A line dated 31 December, read with a reference time in January, keeps
+//     the earlier year, so a log that crosses the turn of the year holds its
+//     order.
+//   - The year after, when ref itself sits within [MaxClockSkew] of the end
+//     of its own year. A host east of UTC reaches the new year first, so its
+//     entries read as ahead of a reference time still in the old one.
+//
+// A log that crosses a year boundary therefore keeps its order from either
+// side of the turn.
 //
 // A line dated 29 February takes the most recent leap year at or before the
 // year that this rule gives.
@@ -424,8 +433,11 @@ func parseTimestamp(s string, ref time.Time) (time.Time, error) {
 	return timeFor(ref, month, day, hour, min, sec), nil
 }
 
-// MaxClockSkew is how far after the reference time an entry may fall and
-// still belong to the year of that reference time. See [ParseAt].
+// MaxClockSkew is the furthest ahead of the reference time that an entry may
+// fall and still be read as part of the same turn of the year. An entry
+// further ahead than this is read as a year older. See [ParseAt] for the year
+// that the rule then gives, which can be the year of the reference time,
+// the one before it, or the one after it.
 //
 // A whole day is needed for two reasons. Postfix writes the local time of the
 // host that made the entry, and [Record.Time] holds it as UTC, so an entry
