@@ -19,14 +19,14 @@ Measured on an AMD EPYC 7R13 with Go 1.26.1. The numbers are the median of
 
 | Benchmark | ns/op | B/op | allocs/op |
 |---|---:|---:|---:|
-| `Parse` — Connect | 274 | 128 | 2 |
-| `ParseAt` — Connect | 202 | 128 | 2 |
-| `Parse` — Disconnect (with stats) | 644 | 400 | 4 |
-| `Parse` — Queued | 347 | 128 | 2 |
-| `Parse` — Delivery | 494 | 224 | 2 |
-| `Parse` — Reject | 374 | 176 | 2 |
-| `Parse` — Unknown | 294 | 112 | 2 |
-| `Scanner` — 10 mixed lines | 6,533 | 6,960 | 34 |
+| `Parse` — Connect | 273 | 128 | 2 |
+| `ParseAt` — Connect | 209 | 128 | 2 |
+| `Parse` — Disconnect (with stats) | 655 | 400 | 4 |
+| `Parse` — Queued | 371 | 128 | 2 |
+| `Parse` — Delivery | 518 | 224 | 2 |
+| `Parse` — Reject | 375 | 176 | 2 |
+| `Parse` — Unknown | 305 | 112 | 2 |
+| `Scanner` — 10 mixed lines | 6,453 | 6,960 | 34 |
 
 `Parse` reads the clock for every line, which takes most of the time that it
 gives to the timestamp. `ParseAt` takes the reference time from the caller, so
