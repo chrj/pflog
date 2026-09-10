@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -406,6 +407,139 @@ func TestParse_InvalidPID(t *testing.T) {
 }
 
 // ---- syslog header ----------------------------------------------------------
+
+// Every shape of malformed timestamp that Parse can reach, with the reason it
+// gives. parseTimestamp holds one more, for a string that is not 15
+// characters, which Parse cannot reach because it always cuts exactly 15.
+func TestParse_MalformedTimestamp(t *testing.T) {
+	cases := []struct {
+		name   string
+		ts     string
+		reason string
+	}{
+		{"month not known", "Xxx 29 12:34:56", "unknown month"},
+		{"no space after month", "Jan.29 12:34:56", "expected space after month"},
+		{"day units not a number", "Jan 2x 12:34:56", "invalid day"},
+		{"day tens not a number", "Jan x9 12:34:56", "invalid day"},
+		{"no space after day", "Jan 29x12:34:56", "expected space after day"},
+		{"hour not a number", "Jan 29 1x:34:56", "invalid hour"},
+		{"no colon after hour", "Jan 29 12.34:56", "expected ':' after hour"},
+		{"minute not a number", "Jan 29 12:3x:56", "invalid minute"},
+		{"no colon after minute", "Jan 29 12:34.56", "expected ':' after minute"},
+		{"second not a number", "Jan 29 12:34:5x", "invalid second"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := tc.ts + ` host postfix/qmgr[1]: ABCDE12345: removed`
+
+			_, err := pflog.Parse(line)
+			if err == nil {
+				t.Fatalf("Parse(%q) error = nil, want an error", line)
+			}
+			var e *pflog.TimestampError
+			if !errors.As(err, &e) {
+				t.Fatalf("error type = %T, want *pflog.TimestampError", err)
+			}
+			if e.Timestamp != tc.ts {
+				t.Errorf("Timestamp = %q, want %q", e.Timestamp, tc.ts)
+			}
+			if e.Err == nil {
+				t.Fatal("TimestampError.Err is nil, want the reason")
+			}
+			if e.Err.Error() != tc.reason {
+				t.Errorf("reason = %q, want %q", e.Err.Error(), tc.reason)
+			}
+			if !strings.Contains(e.Error(), tc.reason) {
+				t.Errorf("Error() = %q, want it to hold %q", e.Error(), tc.reason)
+			}
+		})
+	}
+}
+
+// The error types carry the values that troubleshooting needs, so the message
+// each one renders must hold them. The tests elsewhere match on type with
+// errors.As and never read a message.
+func TestErrorMessages(t *testing.T) {
+	t.Run("FormatError", func(t *testing.T) {
+		line := "Jan 29 12:34:56 host"
+		_, err := pflog.Parse(line)
+
+		var e *pflog.FormatError
+		if !errors.As(err, &e) {
+			t.Fatalf("error type = %T, want *pflog.FormatError", err)
+		}
+		got := e.Error()
+		for _, want := range []string{"pflog:", "missing process field", line} {
+			if !strings.Contains(got, want) {
+				t.Errorf("Error() = %q, want it to hold %q", got, want)
+			}
+		}
+	})
+
+	t.Run("TimestampError", func(t *testing.T) {
+		_, err := pflog.Parse("Jan 32 12:34:56 host postfix/qmgr[1]: removed")
+
+		var e *pflog.TimestampError
+		if !errors.As(err, &e) {
+			t.Fatalf("error type = %T, want *pflog.TimestampError", err)
+		}
+		got := e.Error()
+		for _, want := range []string{"pflog:", "Jan 32 12:34:56", "day 32 is out of range for January"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("Error() = %q, want it to hold %q", got, want)
+			}
+		}
+		if e.Err == nil || !strings.Contains(got, e.Err.Error()) {
+			t.Errorf("Error() = %q, want it to hold the wrapped error %v", got, e.Err)
+		}
+	})
+
+	t.Run("PIDError", func(t *testing.T) {
+		_, err := pflog.Parse("Jan 29 12:34:56 host postfix/smtpd[nope]: removed")
+
+		var e *pflog.PIDError
+		if !errors.As(err, &e) {
+			t.Fatalf("error type = %T, want *pflog.PIDError", err)
+		}
+		got := e.Error()
+		for _, want := range []string{"pflog:", "nope"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("Error() = %q, want it to hold %q", got, want)
+			}
+		}
+		if e.Err == nil || !strings.Contains(got, e.Err.Error()) {
+			t.Errorf("Error() = %q, want it to hold the wrapped error %v", got, e.Err)
+		}
+	})
+
+	t.Run("LineTooLongError", func(t *testing.T) {
+		long := `Mar 29 12:34:56 host postfix/smtpd[1]: warning: ` + strings.Repeat("x", 70000)
+		s := pflog.NewScanner(strings.NewReader(long))
+
+		var err error
+		s.SetErrorHandler(func(_ string, e error) { err = e })
+		for s.Scan() {
+		}
+
+		var e *pflog.LineTooLongError
+		if !errors.As(err, &e) {
+			t.Fatalf("error type = %T, want *pflog.LineTooLongError", err)
+		}
+		if e.Len != len(long) {
+			t.Errorf("Len = %d, want %d", e.Len, len(long))
+		}
+		got := e.Error()
+		for _, want := range []string{
+			"pflog:",
+			strconv.Itoa(len(long)),
+			strconv.Itoa(pflog.DefaultMaxLineLen),
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("Error() = %q, want it to hold %q", got, want)
+			}
+		}
+	})
+}
 
 func TestParse_Header_DoubleDigitDay(t *testing.T) {
 	line := `Mar 29 12:34:56 mail.example.com postfix/smtpd[1234]: connect from host[1.2.3.4]`

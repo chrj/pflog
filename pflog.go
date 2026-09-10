@@ -366,7 +366,7 @@ func ParseAt(line string, ref time.Time) (*Record, error) {
 // wrong: "Jan 32" would become 1 February.
 func parseTimestamp(s string, ref time.Time) (time.Time, error) {
 	if len(s) != 15 {
-		return time.Time{}, fmt.Errorf("wrong length")
+		return time.Time{}, errors.New("wrong length")
 	}
 
 	// Month: s[0:3]
@@ -378,53 +378,53 @@ func parseTimestamp(s string, ref time.Time) (time.Time, error) {
 		}
 	}
 	if month == 0 {
-		return time.Time{}, fmt.Errorf("unknown month")
+		return time.Time{}, errors.New("unknown month")
 	}
 
 	if s[3] != ' ' {
-		return time.Time{}, fmt.Errorf("expected space after month")
+		return time.Time{}, errors.New("expected space after month")
 	}
 
 	// Day: s[4:6], space-padded (e.g., " 1" or "29").
 	day, ok := parseSpacePaddedInt(s[4], s[5])
 	if !ok {
-		return time.Time{}, fmt.Errorf("invalid day")
+		return time.Time{}, errors.New("invalid day")
 	}
 	if day < 1 || day > maxDayInMonth[month] {
 		return time.Time{}, fmt.Errorf("day %d is out of range for %s", day, month)
 	}
 
 	if s[6] != ' ' {
-		return time.Time{}, fmt.Errorf("expected space after day")
+		return time.Time{}, errors.New("expected space after day")
 	}
 
 	hour, ok := parseTwoDigitInt(s[7], s[8])
 	if !ok {
-		return time.Time{}, fmt.Errorf("invalid hour")
+		return time.Time{}, errors.New("invalid hour")
 	}
 	if hour > 23 {
 		return time.Time{}, fmt.Errorf("hour %d is out of range", hour)
 	}
 
 	if s[9] != ':' {
-		return time.Time{}, fmt.Errorf("expected ':' after hour")
+		return time.Time{}, errors.New("expected ':' after hour")
 	}
 
 	min, ok := parseTwoDigitInt(s[10], s[11])
 	if !ok {
-		return time.Time{}, fmt.Errorf("invalid minute")
+		return time.Time{}, errors.New("invalid minute")
 	}
 	if min > 59 {
 		return time.Time{}, fmt.Errorf("minute %d is out of range", min)
 	}
 
 	if s[12] != ':' {
-		return time.Time{}, fmt.Errorf("expected ':' after minute")
+		return time.Time{}, errors.New("expected ':' after minute")
 	}
 
 	sec, ok := parseTwoDigitInt(s[13], s[14])
 	if !ok {
-		return time.Time{}, fmt.Errorf("invalid second")
+		return time.Time{}, errors.New("invalid second")
 	}
 	if sec > 59 {
 		return time.Time{}, fmt.Errorf("second %d is out of range", sec)
