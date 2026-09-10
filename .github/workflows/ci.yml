@@ -20,7 +20,8 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go-version }}
-      - run: go test ./...
+      # The race detector needs cgo, which setup-go leaves on.
+      - run: go test -race ./...
 
   lint:
     name: Lint
