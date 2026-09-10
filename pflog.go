@@ -437,15 +437,28 @@ func timeFor(ref time.Time, month time.Month, day, hour, min, sec int) time.Time
 	// The entry is built in UTC, so the year of ref is read in UTC too. This
 	// also keeps Year off the path that looks a zone up.
 	ref = ref.UTC()
-	for year := ref.Year(); ; year-- {
-		if month == time.February && day == 29 && !isLeapYear(year) {
-			continue
-		}
-		t := time.Date(year, month, day, hour, min, sec, 0, time.UTC)
-		if t.Sub(ref) <= MaxClockSkew {
-			return t
-		}
+
+	year := leapSafeYear(ref.Year(), month, day)
+	t := time.Date(year, month, day, hour, min, sec, 0, time.UTC)
+	if t.Sub(ref) <= MaxClockSkew {
+		return t
 	}
+
+	// Too far ahead of ref, so the entry belongs to an earlier year.
+	year = leapSafeYear(year-1, month, day)
+	return time.Date(year, month, day, hour, min, sec, 0, time.UTC)
+}
+
+// leapSafeYear steps back from year until the date exists. Only 29 February
+// can be missing from a year.
+func leapSafeYear(year int, month time.Month, day int) int {
+	if month != time.February || day != 29 {
+		return year
+	}
+	for !isLeapYear(year) {
+		year--
+	}
+	return year
 }
 
 // isLeapYear reports whether year holds a 29 February.
