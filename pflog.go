@@ -934,6 +934,10 @@ func (e *LineTooLongError) Error() string {
 // To be notified when a line is skipped, register a callback with
 // [Scanner.SetErrorHandler] before calling [Scanner.Scan].
 //
+// A Scanner holds the record it last read, so one Scanner must not be used
+// from more than one goroutine at a time. Separate Scanners are independent,
+// and [Parse] and [ParseAt] may be called from any number of goroutines.
+//
 // Usage:
 //
 //	s := pflog.NewScanner(r)

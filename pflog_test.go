@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1660,6 +1661,102 @@ func TestScanner_OverLongCRLFLineReportsLength(t *testing.T) {
 	}
 	if got.Len != len(line) {
 		t.Errorf("Len = %d, want %d", got.Len, len(line))
+	}
+}
+
+// Parse and ParseAt hold no state between calls, so a caller may run them
+// from any number of goroutines. The race detector checks that claim here,
+// and would report a package-level value added later, such as a cache for the
+// year.
+func TestParse_IsSafeForConcurrentUse(t *testing.T) {
+	lines := []string{
+		`Mar 29 12:34:56 host postfix/smtpd[1]: connect from mail.example.com[203.0.113.10]`,
+		`Mar 29 12:34:56 host postfix/qmgr[1]: ABCDE12345: from=<s@example.com>, size=100, nrcpt=1 (queue active)`,
+		`Mar 29 12:34:56 host postfix/smtp[1]: ABCDE12345: to=<u@example.com>, relay=mx[203.0.113.1]:25, delay=0.5, delays=0/0/0/0.5, dsn=2.0.0, status=sent (250 OK)`,
+		`Mar 29 12:34:56 host postfix/smtpd[1]: NOQUEUE: reject: RCPT from unknown[10.0.0.1]: 550 5.1.1 no such user`,
+		`Feb 29 12:00:00 host postfix/qmgr[1]: 3Pt2mN2VXxznjll: removed`,
+	}
+	ref := time.Date(2021, time.June, 1, 0, 0, 0, 0, time.UTC)
+
+	// One answer for each line, worked out before any goroutine starts.
+	want := make([]*pflog.Record, len(lines))
+	for i, line := range lines {
+		r, err := pflog.ParseAt(line, ref)
+		if err != nil {
+			t.Fatalf("ParseAt(%q) error = %v", line, err)
+		}
+		want[i] = r
+	}
+
+	const goroutines = 8
+	const rounds = 200
+
+	var wg sync.WaitGroup
+	errs := make(chan error, goroutines)
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < rounds; i++ {
+				for j, line := range lines {
+					got, err := pflog.ParseAt(line, ref)
+					if err != nil {
+						errs <- fmt.Errorf("ParseAt(%q): %w", line, err)
+						return
+					}
+					if *got != *want[j] {
+						errs <- fmt.Errorf("ParseAt(%q) = %+v, want %+v", line, *got, *want[j])
+						return
+					}
+					if _, err := pflog.Parse(line); err != nil {
+						errs <- fmt.Errorf("Parse(%q): %w", line, err)
+						return
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}
+
+// One Scanner per goroutine must not reach any shared state.
+func TestScanner_SeparateScannersAreIndependent(t *testing.T) {
+	input := strings.Join([]string{
+		`Mar 29 12:34:56 host postfix/smtpd[1]: connect from unknown[10.0.0.1]`,
+		`Mar 29 12:34:57 host postfix/qmgr[1]: ABCDE12345: removed`,
+		`this line does not parse`,
+		`Mar 29 12:34:58 host postfix/smtpd[1]: warning: something`,
+	}, "\n")
+
+	const goroutines = 8
+
+	var wg sync.WaitGroup
+	counts := make([]int, goroutines)
+	skipped := make([]int, goroutines)
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			s := pflog.NewScanner(strings.NewReader(input))
+			s.SetErrorHandler(func(string, error) { skipped[g]++ })
+			for s.Scan() {
+				counts[g]++
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	for g := 0; g < goroutines; g++ {
+		if counts[g] != 3 {
+			t.Errorf("goroutine %d scanned %d records, want 3", g, counts[g])
+		}
+		if skipped[g] != 1 {
+			t.Errorf("goroutine %d skipped %d lines, want 1", g, skipped[g])
+		}
 	}
 }
 
