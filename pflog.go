@@ -198,8 +198,9 @@ type FormatError struct {
 	// Line is the full input line that failed to parse.
 	Line string
 	// Reason is a short description of what part of the format was not
-	// recognised (e.g., "line too short", "missing hostname",
-	// "missing PID bracket", "missing message separator").
+	// recognised. It is one of "line too short", "missing space after
+	// timestamp", "missing hostname", "missing process field",
+	// "missing PID bracket" or "missing message separator".
 	Reason string
 }
 
@@ -252,8 +253,11 @@ func (e *PIDError) Unwrap() error { return e.Err }
 func Parse(line string) (*Record, error) {
 	// The BSD syslog timestamp is always exactly 15 characters: "Mmm _D HH:MM:SS"
 	const tsLen = 15
-	if len(line) <= tsLen || line[tsLen] != ' ' {
+	if len(line) <= tsLen {
 		return nil, &FormatError{Line: line, Reason: "line too short"}
+	}
+	if line[tsLen] != ' ' {
+		return nil, &FormatError{Line: line, Reason: "missing space after timestamp"}
 	}
 
 	ts, err := parseTimestamp(line[:tsLen])
@@ -266,7 +270,13 @@ func Parse(line string) (*Record, error) {
 	// hostname is the next space-delimited token.
 	spaceIdx := strings.IndexByte(rest, ' ')
 	if spaceIdx < 0 {
-		return nil, &FormatError{Line: line, Reason: "missing hostname"}
+		// Nothing follows the timestamp at all, or a hostname stands alone
+		// with no process field after it.
+		reason := "missing process field"
+		if rest == "" {
+			reason = "missing hostname"
+		}
+		return nil, &FormatError{Line: line, Reason: reason}
 	}
 	hostname := rest[:spaceIdx]
 	rest = rest[spaceIdx+1:]

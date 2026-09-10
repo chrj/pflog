@@ -50,40 +50,51 @@ func assertTime(t *testing.T, got time.Time, month time.Month, day, hour, min, s
 
 func TestParse_InvalidFormat(t *testing.T) {
 	cases := []struct {
+		name   string
 		line   string
 		reason string
 	}{
-		{"", "line too short"},
-		{"not a syslog line", "line too short"},
-		{"Jan 1 00:00:00 hostname", "line too short"},
-		{"random garbage data", "line too short"},
-		// Has a valid-length timestamp prefix but no hostname after it.
-		{"Jan 29 12:34:56 host", "missing hostname"},
-		// Has hostname but no PID bracket.
-		{"Jan 29 12:34:56 host postfix", "missing PID bracket"},
-		// Has PID bracket but no closing "]: " separator.
-		{"Jan 29 12:34:56 host postfix/smtpd[1]", "missing message separator"},
+		// Shorter than a timestamp and the space that must follow it.
+		{"empty", "", "line too short"},
+		{"timestamp only", "Jan  1 00:00:00", "line too short"},
+		{"shorter than a timestamp", "Jan  1 00:00:0", "line too short"},
+
+		// Long enough, but the 16th character is not a space. The line is
+		// not too short: it does not hold a timestamp of the right shape.
+		{"not a syslog line", "not a syslog line", "missing space after timestamp"},
+		{"garbage", "random garbage data", "missing space after timestamp"},
+		{"day is not padded", "Jan 1 00:00:00 hostname", "missing space after timestamp"},
+		{"wrong separator", "Jan  1 00:00:00Xhost postfix/qmgr[1]: removed", "missing space after timestamp"},
+
+		// Nothing at all after the timestamp.
+		{"nothing after timestamp", "Jan 29 12:34:56 ", "missing hostname"},
+
+		// A hostname, but nothing after it.
+		{"hostname only", "Jan 29 12:34:56 host", "missing process field"},
+
+		{"no PID bracket", "Jan 29 12:34:56 host postfix", "missing PID bracket"},
+		{"no closing bracket", "Jan 29 12:34:56 host postfix/smtpd[1]", "missing message separator"},
 	}
 	for _, tc := range cases {
-		_, err := pflog.Parse(tc.line)
-		if err == nil {
-			t.Errorf("Parse(%q) error = nil, want an error", tc.line)
-			continue
-		}
-		var formatErr *pflog.FormatError
-		if !errors.As(err, &formatErr) {
-			t.Errorf("Parse(%q) error type = %T, want *pflog.FormatError", tc.line, err)
-			continue
-		}
-		if formatErr.Line != tc.line {
-			t.Errorf("FormatError.Line = %q, want %q", formatErr.Line, tc.line)
-		}
-		if formatErr.Reason != tc.reason {
-			t.Errorf("Parse(%q) FormatError.Reason = %q, want %q", tc.line, formatErr.Reason, tc.reason)
-		}
-		if formatErr.Error() == "" {
-			t.Errorf("Parse(%q) FormatError.Error() is empty", tc.line)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := pflog.Parse(tc.line)
+			if err == nil {
+				t.Fatalf("Parse(%q) error = nil, want an error", tc.line)
+			}
+			var formatErr *pflog.FormatError
+			if !errors.As(err, &formatErr) {
+				t.Fatalf("error type = %T, want *pflog.FormatError", err)
+			}
+			if formatErr.Line != tc.line {
+				t.Errorf("FormatError.Line = %q, want %q", formatErr.Line, tc.line)
+			}
+			if formatErr.Reason != tc.reason {
+				t.Errorf("FormatError.Reason = %q, want %q", formatErr.Reason, tc.reason)
+			}
+			if !strings.Contains(formatErr.Error(), tc.reason) {
+				t.Errorf("Error() = %q, want it to hold %q", formatErr.Error(), tc.reason)
+			}
+		})
 	}
 }
 
