@@ -202,6 +202,187 @@ func TestParse_TwentyNinthOfFebruaryIsAccepted(t *testing.T) {
 	}
 }
 
+// ParseAt takes the year from a reference time, so the year is finally
+// something a test can hold.
+func TestParseAt_Year(t *testing.T) {
+	cases := []struct {
+		name string
+		ts   string
+		ref  time.Time
+		want time.Time
+	}{
+		{
+			name: "same year",
+			ts:   "Mar 29 12:34:56",
+			ref:  time.Date(2021, time.June, 1, 0, 0, 0, 0, time.UTC),
+			want: time.Date(2021, time.March, 29, 12, 34, 56, 0, time.UTC),
+		},
+		{
+			name: "a December line read in January takes the year before",
+			ts:   "Dec 31 23:59:59",
+			ref:  time.Date(2021, time.January, 3, 8, 0, 0, 0, time.UTC),
+			want: time.Date(2020, time.December, 31, 23, 59, 59, 0, time.UTC),
+		},
+		{
+			name: "a January line read in January keeps the year",
+			ts:   "Jan  2 08:00:00",
+			ref:  time.Date(2021, time.January, 3, 8, 0, 0, 0, time.UTC),
+			want: time.Date(2021, time.January, 2, 8, 0, 0, 0, time.UTC),
+		},
+		{
+			name: "an entry a few hours ahead keeps the year",
+			ts:   "Jan  3 20:00:00",
+			ref:  time.Date(2021, time.January, 3, 8, 0, 0, 0, time.UTC),
+			want: time.Date(2021, time.January, 3, 20, 0, 0, 0, time.UTC),
+		},
+		{
+			name: "an entry more than a day ahead takes the year before",
+			ts:   "Jan  5 08:00:01",
+			ref:  time.Date(2021, time.January, 3, 8, 0, 0, 0, time.UTC),
+			want: time.Date(2020, time.January, 5, 8, 0, 1, 0, time.UTC),
+		},
+		{
+			name: "an entry in the next year, hours after ref",
+			ts:   "Jan  1 01:00:00",
+			ref:  time.Date(2020, time.December, 31, 12, 0, 0, 0, time.UTC),
+			want: time.Date(2021, time.January, 1, 1, 0, 0, 0, time.UTC),
+		},
+		{
+			name: "an entry in the next year, a minute after ref",
+			ts:   "Jan  1 00:30:00",
+			ref:  time.Date(2020, time.December, 31, 23, 30, 0, 0, time.UTC),
+			want: time.Date(2021, time.January, 1, 0, 30, 0, 0, time.UTC),
+		},
+		{
+			name: "an entry in the next year, at the edge of the skew",
+			ts:   "Jan  1 00:00:00",
+			ref:  time.Date(2020, time.December, 31, 0, 0, 0, 0, time.UTC),
+			want: time.Date(2021, time.January, 1, 0, 0, 0, 0, time.UTC),
+		},
+		{
+			name: "an entry in the next year, past the edge of the skew",
+			ts:   "Jan  1 00:00:01",
+			ref:  time.Date(2020, time.December, 30, 23, 59, 59, 0, time.UTC),
+			want: time.Date(2020, time.January, 1, 0, 0, 1, 0, time.UTC),
+		},
+		{
+			name: "a December entry with a reference on 31 December",
+			ts:   "Dec 30 09:00:00",
+			ref:  time.Date(2020, time.December, 31, 12, 0, 0, 0, time.UTC),
+			want: time.Date(2020, time.December, 30, 9, 0, 0, 0, time.UTC),
+		},
+		{
+			name: "29 February with a leap year reference",
+			ts:   "Feb 29 12:00:00",
+			ref:  time.Date(2020, time.June, 1, 0, 0, 0, 0, time.UTC),
+			want: time.Date(2020, time.February, 29, 12, 0, 0, 0, time.UTC),
+		},
+		{
+			name: "29 February takes the most recent leap year",
+			ts:   "Feb 29 12:00:00",
+			ref:  time.Date(2023, time.June, 1, 0, 0, 0, 0, time.UTC),
+			want: time.Date(2020, time.February, 29, 12, 0, 0, 0, time.UTC),
+		},
+		{
+			name: "a year divisible by 100 is not a leap year",
+			ts:   "Feb 29 12:00:00",
+			ref:  time.Date(1900, time.June, 1, 0, 0, 0, 0, time.UTC),
+			want: time.Date(1896, time.February, 29, 12, 0, 0, 0, time.UTC),
+		},
+		{
+			name: "a year divisible by 400 is a leap year",
+			ts:   "Feb 29 12:00:00",
+			ref:  time.Date(2000, time.June, 1, 0, 0, 0, 0, time.UTC),
+			want: time.Date(2000, time.February, 29, 12, 0, 0, 0, time.UTC),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := tc.ts + ` host postfix/qmgr[1]: ABCDE12345: removed`
+
+			r, err := pflog.ParseAt(line, tc.ref)
+			if err != nil {
+				t.Fatalf("ParseAt(%q) error = %v, want nil", line, err)
+			}
+			if !r.Time.Equal(tc.want) {
+				t.Errorf("Time = %s, want %s",
+					r.Time.Format(time.RFC3339), tc.want.Format(time.RFC3339))
+			}
+			if r.Time.Location() != time.UTC {
+				t.Errorf("Time.Location = %v, want UTC", r.Time.Location())
+			}
+		})
+	}
+}
+
+// A whole log that crosses a year boundary keeps its order when it is read
+// with one reference time.
+func TestParseAt_LogAcrossAYearBoundary(t *testing.T) {
+	ref := time.Date(2021, time.January, 2, 12, 0, 0, 0, time.UTC)
+	lines := []string{
+		`Dec 30 09:00:00 host postfix/qmgr[1]: ABCDE12345: removed`,
+		`Dec 31 23:59:59 host postfix/qmgr[1]: ABCDE12346: removed`,
+		`Jan  1 00:00:01 host postfix/qmgr[1]: ABCDE12347: removed`,
+		`Jan  2 11:00:00 host postfix/qmgr[1]: ABCDE12348: removed`,
+	}
+
+	var last time.Time
+	for i, line := range lines {
+		r, err := pflog.ParseAt(line, ref)
+		if err != nil {
+			t.Fatalf("ParseAt(%q) error = %v", line, err)
+		}
+		if i > 0 && !r.Time.After(last) {
+			t.Errorf("line %d time %s is not after %s",
+				i, r.Time.Format(time.RFC3339), last.Format(time.RFC3339))
+		}
+		last = r.Time
+	}
+
+	wantFirst := time.Date(2020, time.December, 30, 9, 0, 0, 0, time.UTC)
+	r, _ := pflog.ParseAt(lines[0], ref)
+	if !r.Time.Equal(wantFirst) {
+		t.Errorf("first entry = %s, want %s",
+			r.Time.Format(time.RFC3339), wantFirst.Format(time.RFC3339))
+	}
+}
+
+// ParseAt reads the same line as Parse in every way but the year.
+func TestParseAt_ReadsTheSameRecord(t *testing.T) {
+	line := `Mar 29 12:34:56 host postfix/smtp[9]: ABCDE12345: to=<user@example.com>, relay=mx[203.0.113.1]:25, delay=0.5, delays=0/0/0/0.5, dsn=2.0.0, status=sent (250 OK)`
+
+	fromParse, err := pflog.Parse(line)
+	if err != nil {
+		t.Fatalf("Parse error = %v", err)
+	}
+	// The entry time itself is a reference that gives the same year, whatever
+	// the clock says. Reading the clock a second time could straddle the edge
+	// of the skew and pick a different year.
+	fromParseAt, err := pflog.ParseAt(line, fromParse.Time)
+	if err != nil {
+		t.Fatalf("ParseAt error = %v", err)
+	}
+
+	if *fromParse != *fromParseAt {
+		t.Errorf("Parse gave %+v, ParseAt gave %+v", *fromParse, *fromParseAt)
+	}
+}
+
+// A bad line gives the same error from both.
+func TestParseAt_Errors(t *testing.T) {
+	ref := time.Date(2021, time.June, 1, 0, 0, 0, 0, time.UTC)
+	for _, line := range []string{
+		"",
+		"not a syslog line",
+		"Jan 32 00:00:00 host postfix/qmgr[1]: removed",
+		"Jan 29 12:34:56 host postfix/smtpd[x]: removed",
+	} {
+		if _, err := pflog.ParseAt(line, ref); err == nil {
+			t.Errorf("ParseAt(%q) error = nil, want an error", line)
+		}
+	}
+}
+
 func TestParse_InvalidPID(t *testing.T) {
 	line := "Jan  1 00:00:00 host postfix/smtpd[abc]: connect from host[1.2.3.4]"
 	_, err := pflog.Parse(line)
@@ -1512,6 +1693,17 @@ func BenchmarkParse_Connect(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		pflog.Parse(line) //nolint:errcheck
+	}
+}
+
+// ParseAt with a reference time held outside the loop, which is how a caller
+// reads a whole log. It shows the cost of reading the clock for each line.
+func BenchmarkParseAt_Connect(b *testing.B) {
+	line := `Mar 29 12:34:56 host postfix/smtpd[1]: connect from mail.example.com[203.0.113.10]`
+	ref := time.Now()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		pflog.ParseAt(line, ref) //nolint:errcheck
 	}
 }
 

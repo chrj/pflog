@@ -39,10 +39,10 @@ const (
 
 // Record is a parsed Postfix log entry.
 type Record struct {
-	// Time is the log entry timestamp. Because the BSD syslog format omits the
-	// year, it is set to the current UTC year at parse time. Logs that span a
-	// year boundary (e.g., December entries parsed in January) will receive an
-	// incorrect year.
+	// Time is the log entry timestamp, in UTC. The BSD syslog format omits
+	// the year, so [Parse] takes it from the current time and [ParseAt] from
+	// a reference time that the caller gives. Use ParseAt for a log that is
+	// not from the current period.
 	Time time.Time
 	// Hostname is the name of the host that produced the log entry.
 	Hostname string
@@ -250,7 +250,40 @@ func (e *PIDError) Unwrap() error { return e.Err }
 // An error is returned when the line does not match the expected syslog
 // header. If the message body cannot be parsed into a specific type, the
 // [Record.Message] field is set to [Unknown] and no error is returned.
+//
+// Parse takes the year from the current time. Use [ParseAt] to read a log
+// from another period, and to keep the cost of reading the clock out of a
+// loop over many lines.
 func Parse(line string) (*Record, error) {
+	return ParseAt(line, time.Now())
+}
+
+// ParseAt parses a single Postfix log line and returns a [Record], taking the
+// year from ref.
+//
+// The BSD syslog format omits the year. ParseAt takes the most recent year
+// that leaves the entry no more than [MaxClockSkew] after ref. That is
+// usually the year of ref, but either neighbour can win:
+//
+//   - The year before, when the entry would otherwise fall too far ahead.
+//     A line dated 31 December, read with a reference time in January, keeps
+//     the earlier year, so a log that crosses the turn of the year holds its
+//     order.
+//   - The year after, when ref itself sits within [MaxClockSkew] of the end
+//     of its own year. A host east of UTC reaches the new year first, so its
+//     entries read as ahead of a reference time still in the old one.
+//
+// A log that crosses a year boundary therefore keeps its order from either
+// side of the turn.
+//
+// A line dated 29 February takes the most recent leap year at or before the
+// year that this rule gives.
+//
+// Pass a time at or after the newest entry in the log. The time at which the
+// log was read is the usual choice. A time in the middle of the period does
+// not work: an entry more than [MaxClockSkew] after it is read as the year
+// before.
+func ParseAt(line string, ref time.Time) (*Record, error) {
 	// The BSD syslog timestamp is always exactly 15 characters: "Mmm _D HH:MM:SS"
 	const tsLen = 15
 	if len(line) <= tsLen {
@@ -260,7 +293,7 @@ func Parse(line string) (*Record, error) {
 		return nil, &FormatError{Line: line, Reason: "missing space after timestamp"}
 	}
 
-	ts, err := parseTimestamp(line[:tsLen])
+	ts, err := parseTimestamp(line[:tsLen], ref)
 	if err != nil {
 		return nil, &TimestampError{Timestamp: line[:tsLen], Err: err}
 	}
@@ -324,13 +357,14 @@ func Parse(line string) (*Record, error) {
 }
 
 // parseTimestamp parses a 15-character BSD syslog timestamp ("Jan  1 00:00:00")
-// and returns a time.Time in UTC with the current year applied.
+// and returns a time.Time in UTC. The format carries no year, so ref gives it:
+// see [timeFor].
 //
 // Every field is checked against its range before the date is built.
 // time.Date carries a value that is out of range over into the next unit, so
 // without these checks a corrupt line would give a real time that is quietly
 // wrong: "Jan 32" would become 1 February.
-func parseTimestamp(s string) (time.Time, error) {
+func parseTimestamp(s string, ref time.Time) (time.Time, error) {
 	if len(s) != 15 {
 		return time.Time{}, fmt.Errorf("wrong length")
 	}
@@ -396,8 +430,66 @@ func parseTimestamp(s string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("second %d is out of range", sec)
 	}
 
-	now := time.Now().UTC()
-	return time.Date(now.Year(), month, day, hour, min, sec, 0, time.UTC), nil
+	return timeFor(ref, month, day, hour, min, sec), nil
+}
+
+// MaxClockSkew is the furthest ahead of the reference time that an entry may
+// fall and still be read as part of the same turn of the year. An entry
+// further ahead than this is read as a year older. See [ParseAt] for the year
+// that the rule then gives, which can be the year of the reference time,
+// the one before it, or the one after it.
+//
+// A whole day is needed for two reasons. Postfix writes the local time of the
+// host that made the entry, and [Record.Time] holds it as UTC, so an entry
+// from a host east of UTC reads as up to 14 hours ahead. Clocks also differ
+// between hosts.
+const MaxClockSkew = 24 * time.Hour
+
+// timeFor builds the entry time in UTC. It takes the most recent year that
+// leaves the entry no more than [MaxClockSkew] after ref and in which the
+// date exists. Only 29 February can be missing from a year.
+func timeFor(ref time.Time, month time.Month, day, hour, min, sec int) time.Time {
+	// The entry is built in UTC, so the year of ref is read in UTC too. This
+	// also keeps Year off the path that looks a zone up.
+	ref = ref.UTC()
+
+	// Start at the year of ref. An entry may already belong to the year after
+	// it when ref sits within MaxClockSkew of the end of its own year, which
+	// a host east of UTC reaches first. MaxClockSkew is one day, so only
+	// 31 December is close enough.
+	year, refMonth, refDay := ref.Date()
+	if refMonth == time.December && refDay == 31 {
+		year++
+	}
+
+	// Step back to the most recent year that leaves the entry no more than
+	// MaxClockSkew after ref. Each step moves a whole year, so the third
+	// candidate is always in the past.
+	for {
+		y := leapSafeYear(year, month, day)
+		t := time.Date(y, month, day, hour, min, sec, 0, time.UTC)
+		if t.Sub(ref) <= MaxClockSkew {
+			return t
+		}
+		year = y - 1
+	}
+}
+
+// leapSafeYear steps back from year until the date exists. Only 29 February
+// can be missing from a year.
+func leapSafeYear(year int, month time.Month, day int) int {
+	if month != time.February || day != 29 {
+		return year
+	}
+	for !isLeapYear(year) {
+		year--
+	}
+	return year
+}
+
+// isLeapYear reports whether year holds a 29 February.
+func isLeapYear(year int) bool {
+	return year%4 == 0 && (year%100 != 0 || year%400 == 0)
 }
 
 // parseSpacePaddedInt parses a space-or-digit followed by a digit (e.g., " 1" → 1, "29" → 29).
