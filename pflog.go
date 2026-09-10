@@ -434,6 +434,9 @@ const MaxClockSkew = 24 * time.Hour
 // leaves the entry no more than [MaxClockSkew] after ref and in which the
 // date exists. Only 29 February can be missing from a year.
 func timeFor(ref time.Time, month time.Month, day, hour, min, sec int) time.Time {
+	// The entry is built in UTC, so the year of ref is read in UTC too. This
+	// also keeps Year off the path that looks a zone up.
+	ref = ref.UTC()
 	for year := ref.Year(); ; year-- {
 		if month == time.February && day == 29 && !isLeapYear(year) {
 			continue
