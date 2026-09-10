@@ -7,6 +7,7 @@
 ## Features
 
 - Parse individual log lines with `Parse`, or iterate over a log file with `Scanner`.
+- `ParseAt` takes a reference time for the year, which the BSD syslog format omits. Use it for a log from another period, for a log that crosses a year boundary, and to keep the clock read out of a loop over many lines.
 - Each entry is returned as a `Record` containing the timestamp, hostname, Postfix daemon name, process ID, queue ID, and a typed `Message`.
 - Recognised message types: `Connect`, `Disconnect`, `Queued`, `Removed`, `Cleanup`, `Delivery`, `Reject`, `BounceNotification`, `Warning`, and `Unknown`.
 - `Scanner` skips a line that it cannot parse, and a line above `SetMaxLineLen`, so one bad line does not stop the scan. Use `SetErrorHandler` to see the skipped lines.
@@ -14,21 +15,26 @@
 ## Benchmarks
 
 Measured on an AMD EPYC 7R13 with Go 1.26.1. The numbers are the median of
-10 runs of `go test -bench=. -benchmem`.
+16 runs of `go test -bench=. -benchmem`.
 
 | Benchmark | ns/op | B/op | allocs/op |
 |---|---:|---:|---:|
-| `Parse` — Connect | 238 | 128 | 2 |
-| `Parse` — Disconnect (with stats) | 571 | 400 | 4 |
-| `Parse` — Queued | 288 | 128 | 2 |
-| `Parse` — Delivery | 423 | 224 | 2 |
-| `Parse` — Reject | 329 | 176 | 2 |
-| `Parse` — Unknown | 256 | 112 | 2 |
-| `Scanner` — 10 mixed lines | 5,395 | 6,960 | 34 |
+| `Parse` — Connect | 274 | 128 | 2 |
+| `ParseAt` — Connect | 202 | 128 | 2 |
+| `Parse` — Disconnect (with stats) | 644 | 400 | 4 |
+| `Parse` — Queued | 347 | 128 | 2 |
+| `Parse` — Delivery | 494 | 224 | 2 |
+| `Parse` — Reject | 374 | 176 | 2 |
+| `Parse` — Unknown | 294 | 112 | 2 |
+| `Scanner` — 10 mixed lines | 6,533 | 6,960 | 34 |
+
+`Parse` reads the clock for every line, which takes most of the time that it
+gives to the timestamp. `ParseAt` takes the reference time from the caller, so
+a loop over many lines reads the clock one time. The two rows above measure
+the same line.
 
 The `Scanner` benchmark builds a new scanner for every 10 lines, so it also
-measures the cost to set one up. A scanner that reads 1000 lines takes 440 ns
-and 3.1 allocations for each line.
+measures the cost to set one up.
 
 ## Installation
 
