@@ -270,8 +270,10 @@ func Parse(line string) (*Record, error) {
 // A line dated 29 February takes the most recent leap year at or before the
 // year that this rule gives.
 //
-// Pass the time at which the log was read, or any time inside the period that
-// the log covers.
+// Pass a time at or after the newest entry in the log. The time at which the
+// log was read is the usual choice. A time in the middle of the period does
+// not work: an entry more than [MaxClockSkew] after it is read as the year
+// before.
 func ParseAt(line string, ref time.Time) (*Record, error) {
 	// The BSD syslog timestamp is always exactly 15 characters: "Mmm _D HH:MM:SS"
 	const tsLen = 15
@@ -346,7 +348,8 @@ func ParseAt(line string, ref time.Time) (*Record, error) {
 }
 
 // parseTimestamp parses a 15-character BSD syslog timestamp ("Jan  1 00:00:00")
-// and returns a time.Time in UTC with the current year applied.
+// and returns a time.Time in UTC. The format carries no year, so ref gives it:
+// see [timeFor].
 //
 // Every field is checked against its range before the date is built.
 // time.Date carries a value that is out of range over into the next unit, so
@@ -438,15 +441,26 @@ func timeFor(ref time.Time, month time.Month, day, hour, min, sec int) time.Time
 	// also keeps Year off the path that looks a zone up.
 	ref = ref.UTC()
 
-	year := leapSafeYear(ref.Year(), month, day)
-	t := time.Date(year, month, day, hour, min, sec, 0, time.UTC)
-	if t.Sub(ref) <= MaxClockSkew {
-		return t
+	// Start at the year of ref. An entry may already belong to the year after
+	// it when ref sits within MaxClockSkew of the end of its own year, which
+	// a host east of UTC reaches first. MaxClockSkew is one day, so only
+	// 31 December is close enough.
+	year, refMonth, refDay := ref.Date()
+	if refMonth == time.December && refDay == 31 {
+		year++
 	}
 
-	// Too far ahead of ref, so the entry belongs to an earlier year.
-	year = leapSafeYear(year-1, month, day)
-	return time.Date(year, month, day, hour, min, sec, 0, time.UTC)
+	// Step back to the most recent year that leaves the entry no more than
+	// MaxClockSkew after ref. Each step moves a whole year, so the third
+	// candidate is always in the past.
+	for {
+		y := leapSafeYear(year, month, day)
+		t := time.Date(y, month, day, hour, min, sec, 0, time.UTC)
+		if t.Sub(ref) <= MaxClockSkew {
+			return t
+		}
+		year = y - 1
+	}
 }
 
 // leapSafeYear steps back from year until the date exists. Only 29 February

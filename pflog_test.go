@@ -242,6 +242,36 @@ func TestParseAt_Year(t *testing.T) {
 			want: time.Date(2020, time.January, 5, 8, 0, 1, 0, time.UTC),
 		},
 		{
+			name: "an entry in the next year, hours after ref",
+			ts:   "Jan  1 01:00:00",
+			ref:  time.Date(2020, time.December, 31, 12, 0, 0, 0, time.UTC),
+			want: time.Date(2021, time.January, 1, 1, 0, 0, 0, time.UTC),
+		},
+		{
+			name: "an entry in the next year, a minute after ref",
+			ts:   "Jan  1 00:30:00",
+			ref:  time.Date(2020, time.December, 31, 23, 30, 0, 0, time.UTC),
+			want: time.Date(2021, time.January, 1, 0, 30, 0, 0, time.UTC),
+		},
+		{
+			name: "an entry in the next year, at the edge of the skew",
+			ts:   "Jan  1 00:00:00",
+			ref:  time.Date(2020, time.December, 31, 0, 0, 0, 0, time.UTC),
+			want: time.Date(2021, time.January, 1, 0, 0, 0, 0, time.UTC),
+		},
+		{
+			name: "an entry in the next year, past the edge of the skew",
+			ts:   "Jan  1 00:00:01",
+			ref:  time.Date(2020, time.December, 30, 23, 59, 59, 0, time.UTC),
+			want: time.Date(2020, time.January, 1, 0, 0, 1, 0, time.UTC),
+		},
+		{
+			name: "a December entry with a reference on 31 December",
+			ts:   "Dec 30 09:00:00",
+			ref:  time.Date(2020, time.December, 31, 12, 0, 0, 0, time.UTC),
+			want: time.Date(2020, time.December, 30, 9, 0, 0, 0, time.UTC),
+		},
+		{
 			name: "29 February with a leap year reference",
 			ts:   "Feb 29 12:00:00",
 			ref:  time.Date(2020, time.June, 1, 0, 0, 0, 0, time.UTC),
@@ -325,7 +355,10 @@ func TestParseAt_ReadsTheSameRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse error = %v", err)
 	}
-	fromParseAt, err := pflog.ParseAt(line, time.Now())
+	// The entry time itself is a reference that gives the same year, whatever
+	// the clock says. Reading the clock a second time could straddle the edge
+	// of the skew and pick a different year.
+	fromParseAt, err := pflog.ParseAt(line, fromParse.Time)
 	if err != nil {
 		t.Fatalf("ParseAt error = %v", err)
 	}
