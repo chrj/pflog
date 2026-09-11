@@ -632,9 +632,10 @@ type client struct {
 // and a search from the left stops inside the client field, away from a
 // bracket in the text that follows it, such as a rejection reason.
 //
-// A port is read only when a colon and at least one digit follow the closing
-// bracket. Anything else after the bracket is left in rest, so a reject line
-// keeps the ": " that its code follows.
+// A colon after the closing bracket starts a port, unless it is the ": " that
+// a reject line puts before its code. A port that is not valid makes the whole
+// client not valid, so that no caller reads on past it with a wrong port or
+// with none.
 func splitClientAddress(s string) (c client, rest string, ok bool) {
 	open := strings.IndexByte(s, '[')
 	if open < 0 {
@@ -649,27 +650,36 @@ func splitClientAddress(s string) (c client, rest string, ok bool) {
 	c = client{hostname: s[:open], address: s[open+1 : end]}
 	rest = s[end+1:]
 
-	if port, after, found := splitPort(rest); found {
+	if strings.HasPrefix(rest, ":") && !strings.HasPrefix(rest, ": ") {
+		port, after, valid := splitPort(rest)
+		if !valid {
+			return client{}, "", false
+		}
 		c.port, rest = port, after
 	}
 	return c, rest, true
 }
 
-// splitPort reads ":<digits>" from the front of s.
+// splitPort reads ":<port>" from the front of s. The port must be 1 to 65535,
+// and it must end the field: at the end of s, before a space, or before the
+// ": " that a reject line puts before its code.
 func splitPort(s string) (port int, rest string, ok bool) {
-	if len(s) < 2 || s[0] != ':' {
-		return 0, s, false
+	if s == "" || s[0] != ':' {
+		return 0, "", false
 	}
 	i := 1
 	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
 		i++
 	}
 	if i == 1 {
-		return 0, s, false
+		return 0, "", false
+	}
+	if i < len(s) && s[i] != ' ' && !strings.HasPrefix(s[i:], ": ") {
+		return 0, "", false
 	}
 	port, err := strconv.Atoi(s[1:i])
-	if err != nil {
-		return 0, s, false
+	if err != nil || port < 1 || port > 65535 {
+		return 0, "", false
 	}
 	return port, s[i:], true
 }

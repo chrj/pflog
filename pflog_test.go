@@ -899,14 +899,29 @@ func TestParse_ClientPort(t *testing.T) {
 
 // Text after the closing bracket that is not a port leaves the line
 // unparsed, as it did before.
+//
+// A port is 1 to 65535. Zero is not a port a client can use, and it would be
+// the same as "no port" in the fields.
 func TestParse_ClientPortMalformed(t *testing.T) {
 	const stamp = `Mar 29 12:34:56 host postfix/smtpd[1]: `
 	for _, msg := range []string{
 		`connect from unknown[10.0.0.1]:`,
 		`connect from unknown[10.0.0.1]:abc`,
 		`connect from unknown[10.0.0.1]:41234x`,
+		`connect from unknown[10.0.0.1]:0`,
+		`connect from unknown[10.0.0.1]:65536`,
 		// All digits, but too large for an int.
 		`connect from unknown[10.0.0.1]:99999999999999999999`,
+
+		`disconnect from unknown[10.0.0.1]:abc ehlo=1`,
+		`disconnect from unknown[10.0.0.1]:41234x ehlo=1 commands=1`,
+		`disconnect from unknown[10.0.0.1]:0 ehlo=1`,
+		`disconnect from unknown[10.0.0.1]:65536 ehlo=1`,
+		`disconnect from unknown[10.0.0.1]:41234:x ehlo=1`,
+
+		`NOQUEUE: reject: RCPT from unknown[10.0.0.1]:41234x: 550 5.1.1 no such user`,
+		`NOQUEUE: reject: RCPT from unknown[10.0.0.1]:0: 550 5.1.1 no such user`,
+		`NOQUEUE: reject: RCPT from unknown[10.0.0.1]:65536: 550 5.1.1 no such user`,
 	} {
 		t.Run(msg, func(t *testing.T) {
 			r := mustParse(t, stamp+msg)
