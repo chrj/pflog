@@ -805,6 +805,133 @@ func TestParse_ConnectWithTrailingText(t *testing.T) {
 	}
 }
 
+// With smtpd_client_port_logging on, Postfix writes the client as
+// "host[address]:port". The three message types that carry a client must all
+// read the port, and must all still read a client that has none.
+func TestParse_ClientPort(t *testing.T) {
+	const stamp = `Mar 29 12:34:56 host postfix/smtpd[1]: `
+
+	t.Run("connect", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			client   string
+			hostname string
+			ip       string
+			port     int
+		}{
+			{"with port", "mail.example.com[203.0.113.10]:41234", "mail.example.com", "203.0.113.10", 41234},
+			{"without port", "mail.example.com[203.0.113.10]", "mail.example.com", "203.0.113.10", 0},
+			{"IPv6 with port", "unknown[2001:db8::1]:25", "unknown", "2001:db8::1", 25},
+			{"IPv6 without port", "unknown[2001:db8::1]", "unknown", "2001:db8::1", 0},
+			{"unknown host with port", "unknown[10.0.0.1]:1", "unknown", "10.0.0.1", 1},
+			{"highest port", "unknown[10.0.0.1]:65535", "unknown", "10.0.0.1", 65535},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				r := mustParse(t, stamp+"connect from "+tc.client)
+				c, ok := r.Message.(pflog.Connect)
+				if !ok {
+					t.Fatalf("Message type = %T, want Connect", r.Message)
+				}
+				if c.Hostname != tc.hostname || c.IP != tc.ip {
+					t.Errorf("hostname/IP = %q/%q, want %q/%q", c.Hostname, c.IP, tc.hostname, tc.ip)
+				}
+				if c.Port != tc.port {
+					t.Errorf("Port = %d, want %d", c.Port, tc.port)
+				}
+			})
+		}
+	})
+
+	t.Run("disconnect", func(t *testing.T) {
+		r := mustParse(t, stamp+`disconnect from mail.example.com[203.0.113.10]:41234 ehlo=1 quit=1 commands=2`)
+		d, ok := r.Message.(pflog.Disconnect)
+		if !ok {
+			t.Fatalf("Message type = %T, want Disconnect", r.Message)
+		}
+		if d.Hostname != "mail.example.com" || d.IP != "203.0.113.10" {
+			t.Errorf("hostname/IP = %q/%q", d.Hostname, d.IP)
+		}
+		if d.Port != 41234 {
+			t.Errorf("Port = %d, want 41234", d.Port)
+		}
+		if d.Stats["commands"] != 2 || d.Stats["ehlo"] != 1 {
+			t.Errorf("Stats = %v, want the counts after the port", d.Stats)
+		}
+	})
+
+	t.Run("disconnect without port", func(t *testing.T) {
+		r := mustParse(t, stamp+`disconnect from unknown[10.0.0.1] ehlo=1 commands=1`)
+		d := r.Message.(pflog.Disconnect)
+		if d.Port != 0 {
+			t.Errorf("Port = %d, want 0", d.Port)
+		}
+	})
+
+	t.Run("reject", func(t *testing.T) {
+		r := mustParse(t, stamp+`NOQUEUE: reject: RCPT from unknown[10.0.0.1]:41234: 550 5.1.1 no such user`)
+		rj, ok := r.Message.(pflog.Reject)
+		if !ok {
+			t.Fatalf("Message type = %T, want Reject", r.Message)
+		}
+		if rj.ClientHostname != "unknown" || rj.ClientIP != "10.0.0.1" {
+			t.Errorf("hostname/IP = %q/%q", rj.ClientHostname, rj.ClientIP)
+		}
+		if rj.ClientPort != 41234 {
+			t.Errorf("ClientPort = %d, want 41234", rj.ClientPort)
+		}
+		if rj.Code != 550 || rj.Detail != "5.1.1 no such user" {
+			t.Errorf("Code/Detail = %d/%q", rj.Code, rj.Detail)
+		}
+	})
+
+	t.Run("reject without port", func(t *testing.T) {
+		r := mustParse(t, stamp+`NOQUEUE: reject: RCPT from unknown[10.0.0.1]: 550 5.1.1 no such user`)
+		rj := r.Message.(pflog.Reject)
+		if rj.ClientPort != 0 {
+			t.Errorf("ClientPort = %d, want 0", rj.ClientPort)
+		}
+		if rj.Detail != "5.1.1 no such user" {
+			t.Errorf("Detail = %q", rj.Detail)
+		}
+	})
+}
+
+// Text after the closing bracket that is not a port leaves the line
+// unparsed, as it did before.
+//
+// A port is 1 to 65535. Zero is not a port a client can use, and it would be
+// the same as "no port" in the fields.
+func TestParse_ClientPortMalformed(t *testing.T) {
+	const stamp = `Mar 29 12:34:56 host postfix/smtpd[1]: `
+	for _, msg := range []string{
+		`connect from unknown[10.0.0.1]:`,
+		`connect from unknown[10.0.0.1]:abc`,
+		`connect from unknown[10.0.0.1]:41234x`,
+		`connect from unknown[10.0.0.1]:0`,
+		`connect from unknown[10.0.0.1]:65536`,
+		// All digits, but too large for an int.
+		`connect from unknown[10.0.0.1]:99999999999999999999`,
+
+		`disconnect from unknown[10.0.0.1]:abc ehlo=1`,
+		`disconnect from unknown[10.0.0.1]:41234x ehlo=1 commands=1`,
+		`disconnect from unknown[10.0.0.1]:0 ehlo=1`,
+		`disconnect from unknown[10.0.0.1]:65536 ehlo=1`,
+		`disconnect from unknown[10.0.0.1]:41234:x ehlo=1`,
+
+		`NOQUEUE: reject: RCPT from unknown[10.0.0.1]:41234x: 550 5.1.1 no such user`,
+		`NOQUEUE: reject: RCPT from unknown[10.0.0.1]:0: 550 5.1.1 no such user`,
+		`NOQUEUE: reject: RCPT from unknown[10.0.0.1]:65536: 550 5.1.1 no such user`,
+	} {
+		t.Run(msg, func(t *testing.T) {
+			r := mustParse(t, stamp+msg)
+			if _, ok := r.Message.(pflog.Unknown); !ok {
+				t.Errorf("Message type = %T, want Unknown", r.Message)
+			}
+		})
+	}
+}
+
 // A rejection reason can hold a bracket. Reading the client field from the
 // left keeps the search away from it.
 func TestParse_RejectDetailWithBracket(t *testing.T) {

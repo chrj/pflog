@@ -70,6 +70,9 @@ type Connect struct {
 	Hostname string
 	// IP is the connecting client's IP address.
 	IP string
+	// Port is the client's TCP port. It is zero unless Postfix logs it,
+	// which needs "smtpd_client_port_logging = yes".
+	Port int
 }
 
 func (Connect) isMessage() {}
@@ -80,6 +83,9 @@ type Disconnect struct {
 	Hostname string
 	// IP is the client's IP address.
 	IP string
+	// Port is the client's TCP port. It is zero unless Postfix logs it,
+	// which needs "smtpd_client_port_logging = yes".
+	Port int
 	// Stats contains per-command counts reported at disconnect
 	// (e.g., {"ehlo": 1, "mail": 1, "rcpt": 1, "commands": 3}).
 	Stats map[string]int
@@ -145,6 +151,9 @@ type Reject struct {
 	ClientHostname string
 	// ClientIP is the rejecting client's IP address.
 	ClientIP string
+	// ClientPort is the client's TCP port. It is zero unless Postfix logs
+	// it, which needs "smtpd_client_port_logging = yes".
+	ClientPort int
 	// Code is the SMTP rejection code (e.g., 550).
 	Code int
 	// Detail is the full rejection reason.
@@ -606,24 +615,73 @@ func parseMessage(msg string) Message {
 	return Unknown{Text: msg}
 }
 
-// splitClientAddress splits "hostname[address]" from the front of s and
-// returns the text that follows the closing bracket. Postfix writes a client
-// this way in connect, disconnect and reject lines.
+// client holds the parts of the field that Postfix writes for a connecting
+// host: "hostname[address]", and ":port" after it when
+// smtpd_client_port_logging is on.
+type client struct {
+	hostname string
+	address  string
+	port     int
+}
+
+// splitClientAddress splits a client from the front of s and returns the text
+// that follows it. Postfix writes a client this way in connect, disconnect
+// and reject lines.
 //
 // The search runs from the left. A hostname from DNS cannot hold a bracket,
 // and a search from the left stops inside the client field, away from a
 // bracket in the text that follows it, such as a rejection reason.
-func splitClientAddress(s string) (hostname, address, rest string, ok bool) {
+//
+// A colon after the closing bracket starts a port, unless it is the ": " that
+// a reject line puts before its code. A port that is not valid makes the whole
+// client not valid, so that no caller reads on past it with a wrong port or
+// with none.
+func splitClientAddress(s string) (c client, rest string, ok bool) {
 	open := strings.IndexByte(s, '[')
 	if open < 0 {
-		return "", "", "", false
+		return client{}, "", false
 	}
 	end := strings.IndexByte(s[open+1:], ']')
 	if end < 0 {
-		return "", "", "", false
+		return client{}, "", false
 	}
 	end += open + 1
-	return s[:open], s[open+1 : end], s[end+1:], true
+
+	c = client{hostname: s[:open], address: s[open+1 : end]}
+	rest = s[end+1:]
+
+	if strings.HasPrefix(rest, ":") && !strings.HasPrefix(rest, ": ") {
+		port, after, valid := splitPort(rest)
+		if !valid {
+			return client{}, "", false
+		}
+		c.port, rest = port, after
+	}
+	return c, rest, true
+}
+
+// splitPort reads ":<port>" from the front of s. The port must be 1 to 65535,
+// and it must end the field: at the end of s, before a space, or before the
+// ": " that a reject line puts before its code.
+func splitPort(s string) (port int, rest string, ok bool) {
+	if s == "" || s[0] != ':' {
+		return 0, "", false
+	}
+	i := 1
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == 1 {
+		return 0, "", false
+	}
+	if i < len(s) && s[i] != ' ' && !strings.HasPrefix(s[i:], ": ") {
+		return 0, "", false
+	}
+	port, err := strconv.Atoi(s[1:i])
+	if err != nil || port < 1 || port > 65535 {
+		return 0, "", false
+	}
+	return port, s[i:], true
 }
 
 func parseConnect(msg string) (Connect, bool) {
@@ -631,12 +689,12 @@ func parseConnect(msg string) (Connect, bool) {
 	if !strings.HasPrefix(msg, prefix) {
 		return Connect{}, false
 	}
-	hostname, address, rest, ok := splitClientAddress(msg[len(prefix):])
+	c, rest, ok := splitClientAddress(msg[len(prefix):])
 	// A connect line ends at the client, so nothing may follow it.
 	if !ok || rest != "" {
 		return Connect{}, false
 	}
-	return Connect{Hostname: hostname, IP: address}, true
+	return Connect{Hostname: c.hostname, IP: c.address, Port: c.port}, true
 }
 
 func parseDisconnect(msg string) (Disconnect, bool) {
@@ -644,13 +702,14 @@ func parseDisconnect(msg string) (Disconnect, bool) {
 	if !strings.HasPrefix(msg, prefix) {
 		return Disconnect{}, false
 	}
-	hostname, address, rest, ok := splitClientAddress(msg[len(prefix):])
+	c, rest, ok := splitClientAddress(msg[len(prefix):])
 	if !ok {
 		return Disconnect{}, false
 	}
 	return Disconnect{
-		Hostname: hostname,
-		IP:       address,
+		Hostname: c.hostname,
+		IP:       c.address,
+		Port:     c.port,
 		Stats:    parseStats(strings.TrimSpace(rest)),
 	}, true
 }
@@ -837,7 +896,7 @@ func parseReject(msg string) (Reject, bool) {
 	rest = rest[len(fromPrefix):]
 
 	// "hostname[ip]: code detail"
-	clientHostname, clientIP, rest, ok := splitClientAddress(rest)
+	c, rest, ok := splitClientAddress(rest)
 	if !ok {
 		return Reject{}, false
 	}
@@ -859,8 +918,9 @@ func parseReject(msg string) (Reject, bool) {
 
 	return Reject{
 		Stage:          stage,
-		ClientHostname: clientHostname,
-		ClientIP:       clientIP,
+		ClientHostname: c.hostname,
+		ClientIP:       c.address,
+		ClientPort:     c.port,
 		Code:           code,
 		Detail:         rest[i+1:],
 	}, true

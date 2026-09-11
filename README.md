@@ -10,6 +10,7 @@
 - `ParseAt` takes a reference time for the year, which the BSD syslog format omits. Use it for a log from another period, for a log that crosses a year boundary, and to keep the clock read out of a loop over many lines.
 - Each entry is returned as a `Record` containing the timestamp, hostname, Postfix daemon name, process ID, queue ID, and a typed `Message`.
 - Recognised message types: `Connect`, `Disconnect`, `Queued`, `Removed`, `Cleanup`, `Delivery`, `Reject`, `BounceNotification`, `Warning`, and `Unknown`.
+- `Connect`, `Disconnect` and `Reject` carry the client port when Postfix logs it, which needs `smtpd_client_port_logging = yes`. The field is zero when it is off.
 - `Scanner` skips a line that it cannot parse, and a line above `SetMaxLineLen`, so one bad line does not stop the scan. Use `SetErrorHandler` to see the skipped lines.
 
 ## Benchmarks
@@ -19,14 +20,14 @@ Measured on an AMD EPYC 7R13 with Go 1.26.1. The numbers are the median of
 
 | Benchmark | ns/op | B/op | allocs/op |
 |---|---:|---:|---:|
-| `Parse` — Connect | 273 | 128 | 2 |
-| `ParseAt` — Connect | 209 | 128 | 2 |
-| `Parse` — Disconnect (with stats) | 655 | 400 | 4 |
-| `Parse` — Queued | 371 | 128 | 2 |
-| `Parse` — Delivery | 518 | 224 | 2 |
-| `Parse` — Reject | 375 | 176 | 2 |
-| `Parse` — Unknown | 305 | 112 | 2 |
-| `Scanner` — 10 mixed lines | 6,453 | 6,960 | 34 |
+| `Parse` — Connect | 292 | 144 | 2 |
+| `ParseAt` — Connect | 228 | 144 | 2 |
+| `Parse` — Disconnect (with stats) | 627 | 400 | 4 |
+| `Parse` — Queued | 337 | 128 | 2 |
+| `Parse` — Delivery | 468 | 224 | 2 |
+| `Parse` — Reject | 359 | 176 | 2 |
+| `Parse` — Unknown | 272 | 112 | 2 |
+| `Scanner` — 10 mixed lines | 6,456 | 6,972 | 34 |
 
 `Parse` reads the clock for every line, which takes most of the time that it
 gives to the timestamp. `ParseAt` takes the reference time from the caller, so
