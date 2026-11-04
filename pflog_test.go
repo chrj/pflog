@@ -1696,10 +1696,7 @@ func (r *repeatReader) Read(p []byte) (int, error) {
 	if r.n == 0 {
 		return 0, io.EOF
 	}
-	n := len(p)
-	if n > r.n {
-		n = r.n
-	}
+	n := min(len(p), r.n)
 	for i := 0; i < n; i++ {
 		p[i] = r.b
 	}

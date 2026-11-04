@@ -332,15 +332,14 @@ func ParseAt(line string, ref time.Time) (*Record, error) {
 	rest = rest[bracketIdx+1:]
 
 	// Find "]: " to delimit the PID and the message body.
-	colonIdx := strings.Index(rest, "]: ")
-	if colonIdx < 0 {
+	pidText, msg, ok := strings.Cut(rest, "]: ")
+	if !ok {
 		return nil, &FormatError{Line: line, Reason: "missing message separator"}
 	}
-	pid, err := strconv.Atoi(rest[:colonIdx])
+	pid, err := strconv.Atoi(pidText)
 	if err != nil {
-		return nil, &PIDError{PID: rest[:colonIdx], Err: err}
+		return nil, &PIDError{PID: pidText, Err: err}
 	}
-	msg := rest[colonIdx+3:]
 
 	// Extract the daemon name from "postfix/daemon" or a plain name.
 	process := processField
@@ -953,14 +952,10 @@ func parseStats(s string) map[string]int {
 	stats := make(map[string]int)
 	for s != "" {
 		var part string
-		if i := strings.IndexByte(s, ' '); i >= 0 {
-			part, s = s[:i], s[i+1:]
-		} else {
-			part, s = s, ""
-		}
-		if i := strings.IndexByte(part, '='); i >= 0 {
-			if v, err := strconv.Atoi(part[i+1:]); err == nil {
-				stats[part[:i]] = v
+		part, s, _ = strings.Cut(s, " ")
+		if key, value, ok := strings.Cut(part, "="); ok {
+			if v, err := strconv.Atoi(value); err == nil {
+				stats[key] = v
 			}
 		}
 	}
