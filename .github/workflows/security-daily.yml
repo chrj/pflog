@@ -24,7 +24,7 @@ jobs:
         with:
           # The module supports old Go releases. Scan it with the current
           # Go, which is the one that a new build uses.
-          go-version: "1.27.3"
+          go-version: "1.27.4"
           cache: false
 
       - name: Run govulncheck
@@ -75,7 +75,7 @@ jobs:
         with:
           # The module supports old Go releases. Scan it with the current
           # Go, which is the one that a new build uses.
-          go-version: "1.27.3"
+          go-version: "1.27.4"
           cache: false
 
       - name: Run gosec
